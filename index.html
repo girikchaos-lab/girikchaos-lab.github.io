@@ -66,6 +66,19 @@
   }
   .glow-btn:hover { transform: scale(1.05); }
 
+  .invite-btn {
+    background: #0d2818;
+    color: #5cff8f;
+    border: 2px solid #2bff6b;
+    animation: pulse-green 2s infinite;
+  }
+
+  @keyframes pulse-green {
+    0%   { box-shadow: 0 0 6px rgba(40,255,100,0.5); }
+    50%  { box-shadow: 0 0 22px rgba(40,255,100,0.9); }
+    100% { box-shadow: 0 0 6px rgba(40,255,100,0.5); }
+  }
+
   @keyframes pulse {
     0%   { box-shadow: 0 0 6px rgba(255,40,40,0.5); }
     50%  { box-shadow: 0 0 22px rgba(255,40,40,0.9); }
@@ -113,6 +126,10 @@
   </div>
 
   <p style="text-align:center;">This is the official home for the Girik Chaos Discord bot — leveling, moderation, mini-games, and chaos-grade welcome messages, all in one bot.</p>
+
+  <div class="nav-buttons">
+    <a href="https://discord.com/oauth2/authorize?client_id=1522602324764266596&permissions=8&integration_type=0&scope=bot+applications.commands" target="_blank" class="glow-btn invite-btn" style="text-decoration:none; display:inline-block;">🤖 Invite the Bot</a>
+  </div>
 
   <div class="nav-buttons">
     <button class="glow-btn" onclick="showPage('terms')">📜 Terms of Service</button>
