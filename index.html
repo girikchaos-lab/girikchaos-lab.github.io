@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Girik Chaos</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 0 20px 60px;
+    line-height: 1.6;
+    background: #141414;
+    color: #e8e8e8;
+  }
+
+  .banner { text-align: center; padding: 40px 0 10px; }
+  .banner img {
+    width: 130px;
+    border-radius: 18px;
+    box-shadow: 0 0 30px rgba(255,0,0,0.5);
+  }
+
+  h1 { text-align: center; color: #fff; margin-top: 10px; }
+  h2 { color: #ff4b4b; margin-top: 30px; }
+
+  .tagline {
+    text-align: center;
+    color: #ff4b4b;
+    font-size: 1.15em;
+    font-weight: bold;
+    margin: 10px 0 25px;
+  }
+
+  .joke-box {
+    background: #1f1f1f;
+    border-left: 4px solid #8b0000;
+    padding: 14px 18px;
+    border-radius: 8px;
+    margin: 20px 0;
+    font-style: italic;
+    color: #ddd;
+  }
+
+  .nav-buttons {
+    display: flex;
+    justify-content: center;
+    gap: 16px;
+    margin: 30px 0;
+    flex-wrap: wrap;
+  }
+
+  .glow-btn {
+    background: #1a1a1a;
+    color: #ff5c5c;
+    border: 2px solid #ff2b2b;
+    padding: 12px 22px;
+    border-radius: 10px;
+    font-size: 1em;
+    font-weight: bold;
+    cursor: pointer;
+    animation: pulse 2s infinite;
+    transition: transform 0.15s ease;
+  }
+  .glow-btn:hover { transform: scale(1.05); }
+
+  @keyframes pulse {
+    0%   { box-shadow: 0 0 6px rgba(255,40,40,0.5); }
+    50%  { box-shadow: 0 0 22px rgba(255,40,40,0.9); }
+    100% { box-shadow: 0 0 6px rgba(255,40,40,0.5); }
+  }
+
+  .home-btn {
+    display: block;
+    margin: 0 0 30px;
+    width: fit-content;
+  }
+
+  .updated { color: #999; font-size: 0.9em; }
+  a { color: #ff8080; }
+
+  .footer-note {
+    text-align: center;
+    margin-top: 50px;
+    color: #777;
+    font-size: 0.85em;
+  }
+
+  .page { display: none; }
+  .page.active { display: block; }
+</style>
+</head>
+<body>
+
+<!-- ===================== HOME PAGE ===================== -->
+<div id="home" class="page active">
+  <div class="banner">
+    <img src="girik-chaos.gif" alt="Girik Chaos">
+  </div>
+  <h1>Welcome to CHAOS COMMUNITY 💀</h1>
+  <p class="tagline">Home of Girik Chaos — bot, bad jokes, and pure vibes</p>
+
+  <div class="joke-box">
+    "Why did the moderator cross the road? To kick someone on the other side." 🐔🔨
+  </div>
+  <div class="joke-box">
+    "My bot has more uptime than my sleep schedule." 💀
+  </div>
+  <div class="joke-box">
+    "Warning #1: for existing. Warning #2: for vibing too hard." ⚠️
+  </div>
+
+  <p style="text-align:center;">This is the official home for the Girik Chaos Discord bot — leveling, moderation, mini-games, and chaos-grade welcome messages, all in one bot.</p>
+
+  <div class="nav-buttons">
+    <button class="glow-btn" onclick="showPage('terms')">📜 Terms of Service</button>
+    <button class="glow-btn" onclick="showPage('privacy')">🔒 Privacy Policy</button>
+  </div>
+
+  <p class="footer-note">Built different. Built chaotic. 🔥</p>
+</div>
+
+<!-- ===================== TERMS PAGE ===================== -->
+<div id="terms" class="page">
+  <button class="glow-btn home-btn" onclick="showPage('home')">🏠 Home</button>
+
+  <h1>Terms of Service</h1>
+  <p class="updated">Last updated: July 2026</p>
+
+  <p>These Terms of Service ("Terms") govern your use of this Discord bot ("the Bot"), operated by Girik Chaos ("we", "us", "our"). By adding the Bot to a Discord server or interacting with it, you agree to these Terms.</p>
+
+  <h2>1. Description of Service</h2>
+  <p>The Bot provides features including but not limited to: welcome messages, moderation commands (kick, ban, mute, warn), an experience/leveling system, mini-games, and related community tools for Discord servers.</p>
+
+  <h2>2. Acceptable Use</h2>
+  <p>You agree not to use the Bot to:</p>
+  <ul>
+    <li>Violate Discord's Terms of Service or Community Guidelines</li>
+    <li>Harass, abuse, or harm other users</li>
+    <li>Attempt to exploit, spam, or disrupt the Bot's functionality</li>
+    <li>Use the Bot for any unlawful purpose</li>
+  </ul>
+
+  <h2>3. Moderation Features</h2>
+  <p>Server members with appropriate Discord permissions (such as Kick Members, Ban Members, or Administrator) may use the Bot's moderation commands within their own server. We are not responsible for how individual server staff choose to use these features.</p>
+
+  <h2>4. Availability</h2>
+  <p>The Bot is provided on an "as-is" basis. We do not guarantee uninterrupted or error-free operation, and the Bot may be unavailable at times for maintenance, updates, or reasons outside our control.</p>
+
+  <h2>5. Changes to the Bot or Terms</h2>
+  <p>We may update, modify, or discontinue features of the Bot at any time. We may also revise these Terms from time to time; continued use of the Bot after changes means you accept the updated Terms.</p>
+
+  <h2>6. Limitation of Liability</h2>
+  <p>To the fullest extent permitted by law, we are not liable for any damages or losses resulting from your use of the Bot, including moderation actions taken by server staff using the Bot.</p>
+
+  <h2>7. Contact</h2>
+  <p>If you have questions about these Terms, you can reach us at: Discord — girik_chaos</p>
+
+  <p class="footer-note">Thanks for being part of the chaos 🔥 — now go spawn some fun.</p>
+</div>
+
+<!-- ===================== PRIVACY PAGE ===================== -->
+<div id="privacy" class="page">
+  <button class="glow-btn home-btn" onclick="showPage('home')">🏠 Home</button>
+
+  <h1>Privacy Policy</h1>
+  <p class="updated">Last updated: July 2026</p>
+
+  <p>This Privacy Policy explains what information this Discord bot ("the Bot"), operated by Girik Chaos, collects, how it's used, and your choices regarding that data.</p>
+
+  <h2>1. Information We Collect</h2>
+  <p>To provide its features, the Bot stores the following data:</p>
+  <ul>
+    <li><strong>Discord User IDs</strong> — used to track leveling progress, warnings, and game win streaks</li>
+    <li><strong>Server (Guild) IDs</strong> — used to remember which roles belong to that server's leveling system</li>
+    <li><strong>Experience points (XP) and level data</strong> — earned through chatting or playing mini-games</li>
+    <li><strong>Moderation records</strong> — warnings issued by server staff, including the reason and moderator</li>
+  </ul>
+  <p>The Bot does <strong>not</strong> permanently store the content of your messages. Message text is only read briefly and in real time to check for chat activity (for XP) or command usage, and is not saved afterward.</p>
+
+  <h2>2. How We Use This Information</h2>
+  <p>Collected data is used solely to operate the Bot's features — leveling, moderation logs, and game mechanics — within the Discord servers where the Bot is added. We do not sell, rent, or share this data with third parties.</p>
+
+  <h2>3. Data Storage</h2>
+  <p>Data is stored securely and only for as long as necessary to provide the Bot's functionality. If the Bot is removed from a server, that server's associated data may be deleted at our discretion.</p>
+
+  <h2>4. Your Rights</h2>
+  <p>You can request that your data (such as XP, level, or warning history) be reset or deleted by contacting us using the information below. Server administrators may also request removal of their server's data.</p>
+
+  <h2>5. Children's Privacy</h2>
+  <p>The Bot is intended for use in accordance with Discord's own Terms of Service, which require users to meet Discord's minimum age requirement. We do not knowingly collect additional personal information beyond what Discord itself provides through normal bot operation.</p>
+
+  <h2>6. Changes to This Policy</h2>
+  <p>We may update this Privacy Policy from time to time. Continued use of the Bot after changes means you accept the updated policy.</p>
+
+  <h2>7. Contact</h2>
+  <p>If you have questions about this Privacy Policy or your data, contact us at: Discord — girik_chaos</p>
+
+  <p class="footer-note">No cap, we keep it simple 💀 — your data, your rules.</p>
+</div>
+
+<script>
+  function showPage(pageId) {
+    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+    document.getElementById(pageId).classList.add('active');
+    window.location.hash = pageId === 'home' ? '' : pageId;
+    window.scrollTo(0, 0);
+  }
+
+  // Support direct links like yoursite.github.io/#terms or #privacy
+  window.addEventListener('DOMContentLoaded', () => {
+    const hash = window.location.hash.replace('#', '');
+    if (hash === 'terms' || hash === 'privacy') {
+      showPage(hash);
+    }
+  });
+</script>
+
+</body>
+</html>
