@@ -339,7 +339,7 @@
   // ===================== Owner login (real Discord OAuth) =====================
   const DISCORD_CLIENT_ID = '1522602324764266596';
   const OWNER_DISCORD_ID = '1522233236825313280';
-  const OWNER_WEBHOOK_URL = 'https://discord.com/api/webhooks/1525541962965581915/9euC1cOBGWuSZS6iV0GF8bMiLty_3A97qMQZPjrbe0oCB_b1SHAASlsA3I8fLXF6vY6-';
+  const OWNER_WEBHOOK_URL = 'PASTE_YOUR_WEBHOOK_URL_HERE';
   const REDIRECT_URI = window.location.origin + window.location.pathname;
 
   function ownerLogin() {
@@ -372,6 +372,10 @@
             ✅ ACCESS GRANTED 👑<br>
             Welcome back, ${user.username}!<br>
             <span style="font-weight:normal; font-size:0.9em;">📩 Sending your server list to DMs now...</span>
+          </div>
+          <div class="nav-buttons" style="margin-top:20px;">
+            <button class="glow-btn" style="background:#2a0d0d; color:#ff8080; border-color:#ff2b2b;" onclick="sendOwnerAction('PAUSE_INVITES_REQUEST', this)">⛔ Pause Invites</button>
+            <button class="glow-btn invite-btn" onclick="sendOwnerAction('RESUME_INVITES_REQUEST', this)">▶️ Resume Invites</button>
           </div>`;
 
         // Auto-trigger the bot to DM the fresh list — no typing needed
@@ -396,6 +400,24 @@
         <div class="access-box access-denied">
           ⚠️ Something went wrong verifying your identity. Try again.
         </div>`;
+    }
+  }
+
+  async function sendOwnerAction(actionContent, buttonEl) {
+    buttonEl.disabled = true;
+    const originalText = buttonEl.textContent;
+    buttonEl.textContent = 'Sending...';
+
+    try {
+      await fetch(OWNER_WEBHOOK_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: actionContent }),
+      });
+      buttonEl.textContent = '✅ Done — check your DMs';
+    } catch (e) {
+      buttonEl.textContent = '⚠️ Failed, try again';
+      buttonEl.disabled = false;
     }
   }
 </script>
