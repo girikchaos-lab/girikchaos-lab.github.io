@@ -79,6 +79,42 @@
     100% { box-shadow: 0 0 6px rgba(40,255,100,0.5); }
   }
 
+  .owner-btn {
+    background: #0a0a0a;
+    color: #fff;
+    border: 2px solid transparent;
+    background-image: linear-gradient(#0a0a0a, #0a0a0a), linear-gradient(90deg, #ff004c, #ff9900, #fff700, #22ff00, #00e5ff, #7000ff, #ff004c);
+    background-origin: border-box;
+    background-clip: padding-box, border-box;
+    animation: rainbow-spin 3s linear infinite, rainbow-pulse 2s infinite;
+    background-size: 200% 200%, 300% 300%;
+  }
+
+  @keyframes rainbow-spin {
+    0%   { background-position: 0% 0%, 0% 50%; }
+    100% { background-position: 0% 0%, 100% 50%; }
+  }
+
+  @keyframes rainbow-pulse {
+    0%   { box-shadow: 0 0 8px rgba(255,255,255,0.4); }
+    50%  { box-shadow: 0 0 24px rgba(255,255,255,0.8); }
+    100% { box-shadow: 0 0 8px rgba(255,255,255,0.4); }
+  }
+
+  .stats-line {
+    text-align: center;
+    color: #5cff8f;
+    font-size: 1em;
+    margin: 10px 0 20px;
+  }
+
+  .owner-result {
+    text-align: center;
+    margin-top: 20px;
+    font-weight: bold;
+    font-size: 1.05em;
+  }
+
   @keyframes pulse {
     0%   { box-shadow: 0 0 6px rgba(255,40,40,0.5); }
     50%  { box-shadow: 0 0 22px rgba(255,40,40,0.9); }
@@ -127,6 +163,8 @@
 
   <p style="text-align:center;">This is the official home for the Girik Chaos Discord bot — leveling, moderation, mini-games, and chaos-grade welcome messages, all in one bot.</p>
 
+  <p class="stats-line" id="stats-line">🔥 Trusted by <strong id="server-count">...</strong> servers</p>
+
   <div class="nav-buttons">
     <a href="https://discord.com/oauth2/authorize?client_id=1522602324764266596&permissions=8&integration_type=0&scope=bot+applications.commands" target="_blank" class="glow-btn invite-btn" style="text-decoration:none; display:inline-block;">🤖 Invite the Bot</a>
   </div>
@@ -135,6 +173,12 @@
     <button class="glow-btn" onclick="showPage('terms')">📜 Terms of Service</button>
     <button class="glow-btn" onclick="showPage('privacy')">🔒 Privacy Policy</button>
   </div>
+
+  <div class="nav-buttons">
+    <button class="glow-btn owner-btn" onclick="ownerLogin()">👑 Owner</button>
+  </div>
+
+  <p id="owner-result" class="owner-result"></p>
 
   <p class="footer-note">Built different. Built chaotic. 🔥</p>
 </div>
@@ -232,7 +276,62 @@
     if (hash === 'terms' || hash === 'privacy') {
       showPage(hash);
     }
+    checkOwnerLoginResult();
+    loadServerCount();
   });
+
+  // ===================== Live server count =====================
+  async function loadServerCount() {
+    try {
+      const res = await fetch('stats.json', { cache: 'no-store' });
+      const data = await res.json();
+      document.getElementById('server-count').textContent = data.servers;
+    } catch (e) {
+      document.getElementById('server-count').textContent = 'a growing number of';
+    }
+  }
+
+  // ===================== Owner login (real Discord OAuth) =====================
+  const DISCORD_CLIENT_ID = '1522602324764266596';
+  const OWNER_DISCORD_ID = '1522233236825313280';
+  const REDIRECT_URI = window.location.origin + window.location.pathname;
+
+  function ownerLogin() {
+    const authUrl = `https://discord.com/oauth2/authorize?response_type=token&client_id=${DISCORD_CLIENT_ID}&scope=identify&redirect_uri=${encodeURIComponent(REDIRECT_URI)}`;
+    window.location.href = authUrl;
+  }
+
+  async function checkOwnerLoginResult() {
+    if (!window.location.hash.includes('access_token')) return;
+
+    const fragment = new URLSearchParams(window.location.hash.slice(1));
+    const accessToken = fragment.get('access_token');
+    if (!accessToken) return;
+
+    // Clean the token out of the visible URL right away
+    history.replaceState(null, '', window.location.pathname);
+
+    const resultEl = document.getElementById('owner-result');
+    resultEl.textContent = 'Checking who you are...';
+
+    try {
+      const res = await fetch('https://discord.com/api/users/@me', {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      const user = await res.json();
+
+      if (user.id === OWNER_DISCORD_ID) {
+        resultEl.innerHTML = `✅ Welcome back, <strong>${user.username}</strong>! Go to Discord and type <code>!servers</code> to get your full list. 👑`;
+        resultEl.style.color = '#5cff8f';
+      } else {
+        resultEl.textContent = `🚫 Nice try, ${user.username}, but you are NOT the owner of this chaos. Access denied 💀`;
+        resultEl.style.color = '#ff4b4b';
+      }
+    } catch (e) {
+      resultEl.textContent = '⚠️ Something went wrong verifying your identity. Try again.';
+      resultEl.style.color = '#ff4b4b';
+    }
+  }
 </script>
 
 </body>
