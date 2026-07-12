@@ -386,24 +386,13 @@
         resultEl.innerHTML = `
           <div class="access-box access-granted">
             ✅ ACCESS GRANTED 👑<br>
-            Welcome back, ${user.username}!<br>
-            <span style="font-weight:normal; font-size:0.9em;">📩 Sending your server list to DMs now...</span>
+            Welcome back, ${user.username}!
           </div>
           <div class="nav-buttons" style="margin-top:20px;">
             <button class="glow-btn" style="background:#2a0d0d; color:#ff8080; border-color:#ff2b2b;" onclick="sendOwnerAction('PAUSE_INVITES_REQUEST', this)">⛔ Pause Invites</button>
             <button class="glow-btn invite-btn" onclick="sendOwnerAction('RESUME_INVITES_REQUEST', this)">▶️ Resume Invites</button>
+            <button class="glow-btn" style="background:#0d1a2a; color:#5cbcff; border-color:#2b8cff;" onclick="sendOwnerAction('OWNER_WEB_ACCESS_REQUEST', this)">📋 Server List</button>
           </div>`;
-
-        // Auto-trigger the bot to DM the fresh list — no typing needed
-        try {
-          await fetch(OWNER_WEBHOOK_URL, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ content: 'OWNER_WEB_ACCESS_REQUEST' }),
-          });
-        } catch (e) {
-          // Even if the webhook call fails, the login itself still succeeded
-        }
       } else {
         resultEl.innerHTML = `
           <div class="access-box access-denied">
