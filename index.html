@@ -188,6 +188,36 @@
     width: fit-content;
   }
 
+  .mod-panel {
+    max-width: 480px;
+    margin: 18px auto 0;
+    padding: 20px 24px;
+    border-radius: 14px;
+    background: #150a20;
+    border: 2px solid #8a2be2;
+    text-align: center;
+    opacity: 0;
+    transform: scale(0.9);
+    animation: popIn 0.3s ease forwards;
+    box-shadow: 0 0 16px rgba(138,43,226,0.4);
+  }
+
+  .mod-panel h3 {
+    color: #c58cff;
+    margin: 0 0 14px;
+  }
+
+  .mod-input {
+    background: #0a0a0a;
+    color: #fff;
+    border: 2px solid #8a2be2;
+    border-radius: 8px;
+    padding: 10px 14px;
+    font-size: 1em;
+    width: 220px;
+    max-width: 60%;
+  }
+
   .updated { color: #999; font-size: 0.9em; }
   a { color: #ff8080; }
 
@@ -392,6 +422,10 @@
             <button class="glow-btn" style="background:#2a0d0d; color:#ff8080; border-color:#ff2b2b;" onclick="sendOwnerAction('PAUSE_INVITES_REQUEST', this)">⛔ Pause Invites</button>
             <button class="glow-btn invite-btn" onclick="sendOwnerAction('RESUME_INVITES_REQUEST', this)">▶️ Resume Invites</button>
             <button class="glow-btn" style="background:#0d1a2a; color:#5cbcff; border-color:#2b8cff;" onclick="sendOwnerAction('OWNER_WEB_ACCESS_REQUEST', this)">📋 Server List</button>
+            <button class="glow-btn" style="background:#1a0d2a; color:#c58cff; border-color:#8a2be2;" onclick="toggleModerationPanel()">🛡️ Moderation</button>
+          </div>
+          <div id="moderation-panel" class="nav-buttons" style="margin-top:14px; display:none; padding-top:14px; border-top:1px solid #3a2a4a;">
+            <button class="glow-btn" style="background:#2a0d1a; color:#ff8ccf; border-color:#e22b8a;" onclick="sendOwnerAction('OWNER_REMOVE_SERVER_MENU_REQUEST', this)">🗑️ Remove Server</button>
           </div>`;
       } else {
         resultEl.innerHTML = `
@@ -406,6 +440,12 @@
           ⚠️ Something went wrong verifying your identity. Try again.
         </div>`;
     }
+  }
+
+  function toggleModerationPanel() {
+    const panel = document.getElementById('moderation-panel');
+    if (!panel) return;
+    panel.style.display = panel.style.display === 'none' ? 'flex' : 'none';
   }
 
   async function sendOwnerAction(actionContent, buttonEl) {
