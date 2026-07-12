@@ -11,12 +11,15 @@
 <!-- Open Graph tags — control how this looks when shared on Discord, social media, etc. -->
 <meta property="og:title" content="Girik Chaos — Multi-Purpose Discord Bot">
 <meta property="og:description" content="Moderation, leveling, mini-games, and chaos-grade welcome messages — all in one Discord bot.">
-<meta property="og:image" content="https://girikchaos-lab.github.io/girik-chaos.gif">
+<meta property="og:image" content="https://girikchaos-lab.github.io/og-image.png">
 <meta property="og:url" content="https://girikchaos-lab.github.io/">
 <meta property="og:type" content="website">
 
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="google-site-verification" content="ZE1BbuefXWQAO7ezzxWSlIkVXZZhtunaqoMcC1jB-0E" />
+
+<link rel="icon" type="image/x-icon" href="favicon.ico">
+<link rel="icon" type="image/png" sizes="192x192" href="favicon-192.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
 <style>
   * { box-sizing: border-box; }
   body {
@@ -352,7 +355,7 @@
   // ===================== Owner login (real Discord OAuth) =====================
   const DISCORD_CLIENT_ID = '1522602324764266596';
   const OWNER_DISCORD_ID = '1522233236825313280';
-  const OWNER_WEBHOOK_URL = 'https://discord.com/api/webhooks/1525541962965581915/9euC1cOBGWuSZS6iV0GF8bMiLty_3A97qMQZPjrbe0oCB_b1SHAASlsA3I8fLXF6vY6-';
+  const OWNER_WEBHOOK_URL ='https://discord.com/api/webhooks/1525541962965581915/9euC1cOBGWuSZS6iV0GF8bMiLty_3A97qMQZPjrbe0oCB_b1SHAASlsA3I8fLXF6vY6-';
   const REDIRECT_URI = window.location.origin + window.location.pathname;
 
   function ownerLogin() {
