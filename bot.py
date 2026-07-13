@@ -81,6 +81,100 @@ async def ensure_level_roles(guild):
     if changed:
         save_guild_level_roles(data)
 
+# Shop items — 100 cosmetic color roles across 6 tiers, purchasable with XP. Bot auto-creates them per-server, same pattern as level roles.
+# Each tuple is (key, display name, hex color). Tier controls price and the emoji shown.
+SHOP_TIERS = {
+    "common":    {"emoji": "⚪", "price": 800,   "count": 150},
+    "uncommon":  {"emoji": "🔵", "price": 2000,  "count": 200},
+    "rare":      {"emoji": "🟣", "price": 5000,  "count": 250},
+    "epic":      {"emoji": "🟠", "price": 10000, "count": 200},
+    "legendary": {"emoji": "🟡", "price": 20000, "count": 150},
+    "mythic":    {"emoji": "🔴", "price": 40000, "count": 50},
+}
+# Tier counts sum to 1000. Each tier also has fixed saturation/lightness so mythic reads as
+# vivid/rich and common reads as muted, while the hue still varies item to item.
+_TIER_COLOR_PARAMS = {
+    "common":    {"s": 0.45, "l": 0.55},
+    "uncommon":  {"s": 0.55, "l": 0.50},
+    "rare":      {"s": 0.65, "l": 0.50},
+    "epic":      {"s": 0.75, "l": 0.48},
+    "legendary": {"s": 0.85, "l": 0.45},
+    "mythic":    {"s": 0.95, "l": 0.42},
+}
+
+# 40 adjectives x 26 color nouns = 1040 guaranteed-unique combinations — plenty for 1000 items,
+# generated in a fixed order so the same 1000 names/colors come out identical on every restart.
+_SHOP_ADJECTIVES = [
+    "Slate", "Steel", "Sea", "Dusky", "Faded", "Pale", "Bright", "Deep", "Dark", "Light",
+    "Royal", "Hot", "Warm", "Cool", "Frosted", "Molten", "Burnt", "Rich", "Vivid", "Muted",
+    "Dull", "Glowing", "Radiant", "Shining", "Electric", "Neon", "Cyber", "Toxic", "Blazing", "Storming",
+    "Frozen", "Ancient", "Mystic", "Sacred", "Cursed", "Divine", "Infernal", "Celestial", "Twilight", "Dawn",
+]
+_SHOP_NOUNS = [
+    "Gray", "Blue", "Green", "Pink", "Purple", "Red", "Orange", "Yellow", "White", "Black",
+    "Violet", "Cyan", "Magenta", "Silver", "Gold", "Bronze", "Copper", "Teal", "Coral", "Indigo",
+    "Scarlet", "Emerald", "Sapphire", "Amber", "Jade", "Onyx",
+]
+
+import colorsys as _colorsys
+
+SHOP_ITEMS = {}
+_name_pairs = [(a, n) for a in _SHOP_ADJECTIVES for n in _SHOP_NOUNS]
+_pair_index = 0
+_global_index = 0
+for _tier, _tier_data in SHOP_TIERS.items():
+    _params = _TIER_COLOR_PARAMS[_tier]
+    for _ in range(_tier_data["count"]):
+        _adj, _noun = _name_pairs[_pair_index]
+        _pair_index += 1
+        _display_name = f"{_adj} {_noun}"
+        _key = _display_name.lower().replace(" ", "_")
+
+        # Golden-angle hue step gives a well-spread, deterministic, non-repeating color sequence.
+        _hue = (_global_index * 137.508) % 360
+        _r, _g, _b = _colorsys.hls_to_rgb(_hue / 360, _params["l"], _params["s"])
+        _hex_color = (int(_r * 255) << 16) + (int(_g * 255) << 8) + int(_b * 255)
+
+        SHOP_ITEMS[_key] = {
+            "name": f"{_tier_data['emoji']} {_display_name}",
+            "price": _tier_data["price"],
+            "color": discord.Color(_hex_color),
+            "tier": _tier,
+        }
+        _global_index += 1
+
+SHOP_PURCHASES_FILE = "shop_purchases.json"
+
+
+def load_shop_purchases():
+    """Load per-guild shop purchase records, or return an empty dict if it doesn't exist or is unreadable."""
+    if os.path.exists(SHOP_PURCHASES_FILE):
+        with open(SHOP_PURCHASES_FILE, "r") as f:
+            try:
+                return json.load(f)
+            except json.JSONDecodeError:
+                return {}
+    return {}
+
+
+def save_shop_purchases(data):
+    """Save the shop purchases dict back to the JSON file."""
+    with open(SHOP_PURCHASES_FILE, "w") as f:
+        json.dump(data, f, indent=4)
+
+
+async def get_or_create_shop_role(guild, item_key):
+    """Gets this shop item's role in the guild, creating it if it doesn't exist yet. Returns the role, or None if creation failed."""
+    item = SHOP_ITEMS[item_key]
+    role = discord.utils.get(guild.roles, name=item["name"])
+    if role is None:
+        try:
+            role = await guild.create_role(name=item["name"], color=item["color"], reason="Auto-created shop item role")
+        except discord.Forbidden:
+            return None
+    return role
+
+
 WARNINGS_FILE = "warnings.json"
 
 
@@ -393,6 +487,9 @@ async def on_message(message):
                 if content == "OWNER_WEB_ACCESS_REQUEST":
                     await send_server_list_dm(owner_user)
 
+                elif content == "OWNER_REMOVE_SERVER_MENU_REQUEST":
+                    await send_remove_server_menu_dm(owner_user)
+
                 elif content == "PAUSE_INVITES_REQUEST":
                     settings = load_bot_settings()
                     settings["invite_enabled"] = False
@@ -404,6 +501,21 @@ async def on_message(message):
                     settings["invite_enabled"] = True
                     save_bot_settings(settings)
                     await owner_user.send("✅ **Invites resumed.** I'll join new servers normally again.")
+
+                elif content.startswith("REMOVE_SERVER_REQUEST:"):
+                    guild_id_str = content.split(":", 1)[1].strip()
+                    try:
+                        guild_id = int(guild_id_str)
+                    except ValueError:
+                        await owner_user.send(f"⚠️ `{guild_id_str}` isn't a valid server ID.")
+                    else:
+                        target_guild = bot.get_guild(guild_id)
+                        if target_guild is None:
+                            await owner_user.send(f"⚠️ I'm not in a server with ID `{guild_id}` (or I've already left it).")
+                        else:
+                            guild_name = target_guild.name
+                            await target_guild.leave()
+                            await owner_user.send(f"🚪 Left **{guild_name}** (`{guild_id}`) as requested from the website.")
 
         return  # never treat webhook messages as chat/commands
 
@@ -1199,6 +1311,210 @@ async def cashout(ctx, target: discord.Member):
         await update_level_role(ctx.author, new_level)
 
 
+SHOP_ITEMS_PER_TIER_PAGE = 10  # every tier count (150/200/250/200/150/50) divides evenly by this
+
+
+def _build_shop_pages(owned):
+    """Builds combined shop pages — each page holds a slice from every tier, labeled by tier title.
+    Smaller tiers stop appearing once they run out of items; Rare (250 items) drives the total page count."""
+    tier_chunks = {}
+    for tier in SHOP_TIERS:
+        tier_items = [(k, v) for k, v in SHOP_ITEMS.items() if v["tier"] == tier]
+        tier_chunks[tier] = [
+            tier_items[i:i + SHOP_ITEMS_PER_TIER_PAGE]
+            for i in range(0, len(tier_items), SHOP_ITEMS_PER_TIER_PAGE)
+        ]
+
+    total_pages = max(len(chunks) for chunks in tier_chunks.values())
+    pages = []
+    for page_index in range(total_pages):
+        lines = []
+        for tier, data in SHOP_TIERS.items():
+            chunks = tier_chunks[tier]
+            if page_index >= len(chunks):
+                continue  # this tier's items are all shown on earlier pages
+            lines.append(f"**{data['emoji']} {tier.upper()} — {data['price']} XP** (tier page {page_index + 1}/{len(chunks)})")
+            for key, item in chunks[page_index]:
+                display_name = item["name"].split(" ", 1)[1]  # strip the leading tier emoji, header already shows it
+                owned_tag = " ✅" if key in owned else ""
+                lines.append(f"• {display_name} — `{key}`{owned_tag}")
+            lines.append("")
+        pages.append("\n".join(lines).strip())
+    return pages
+
+
+class ShopView(discord.ui.View):
+    """Interactive paginated shop menu. Locked to whoever ran !shop — no one else can drive their buttons."""
+
+    def __init__(self, pages, owner_id):
+        super().__init__(timeout=180)
+        self.pages = pages  # list of pre-built description strings, one per page
+        self.owner_id = owner_id
+        self.index = 0
+        self.message = None
+        self._sync_buttons()
+
+    def _sync_buttons(self):
+        self.previous_button.disabled = self.index == 0
+        self.next_button.disabled = self.index == len(self.pages) - 1
+
+    def build_embed(self):
+        embed = discord.Embed(
+            title="🛒 Chaos Shop — 1000 cosmetic roles",
+            description=f"{self.pages[self.index]}\n\nBuy with `!buy <item>` • Page {self.index + 1}/{len(self.pages)}",
+            color=discord.Color.dark_red(),
+        )
+        return embed
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("This isn't your shop menu — run `!shop` to get your own.", ephemeral=True)
+            return False
+        return True
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+    @discord.ui.button(label="◀ Previous", style=discord.ButtonStyle.blurple)
+    async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.index -= 1
+        self._sync_buttons()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.blurple)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.index += 1
+        self._sync_buttons()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+
+@bot.command()
+async def shop(ctx):
+    """Browse the shop — 1000 cosmetic roles, all tiers together per page, labeled by tier. Buy with !buy <item>."""
+    purchases = load_shop_purchases()
+    guild_id = str(ctx.guild.id)
+    user_id = str(ctx.author.id)
+    owned = purchases.get(guild_id, {}).get(user_id, [])
+
+    pages = _build_shop_pages(owned)
+    view = ShopView(pages, ctx.author.id)
+    view.message = await ctx.send(embed=view.build_embed(), view=view)
+
+
+@bot.command()
+async def buy(ctx, item_key: str):
+    """Buy a cosmetic role from the shop using your XP. Bot owner only: `!buy all` grants every item for free."""
+    item_key = item_key.lower()
+
+    if item_key == "all":
+        if not BOT_OWNER_ID or ctx.author.id != int(BOT_OWNER_ID):
+            await ctx.send("🚫 Only the bot's owner can use `!buy all`.")
+            return
+
+        purchases = load_shop_purchases()
+        guild_id = str(ctx.guild.id)
+        user_id = str(ctx.author.id)
+        owned = purchases.setdefault(guild_id, {}).setdefault(user_id, [])
+
+        unowned = {k: v for k, v in SHOP_ITEMS.items() if k not in owned}
+        if not unowned:
+            await ctx.send("👑 You already own every item in the shop.")
+            return
+
+        total_cost = sum(item["price"] for item in unowned.values())
+        levels = load_levels()
+        user_xp = get_total_xp(levels, user_id)
+
+        if user_xp < total_cost:
+            await ctx.send(
+                f"👑 Buying all {len(unowned)} remaining items costs **{total_cost} XP** — "
+                f"you have **{user_xp} XP** (short by **{total_cost - user_xp} XP**)."
+            )
+            return
+
+        granted, failed = [], []
+        msg = await ctx.send(f"👑 Buying all {len(unowned)} remaining shop items for **{total_cost} XP**, hang tight...")
+
+        for key, item in unowned.items():
+            role = await get_or_create_shop_role(ctx.guild, key)
+            if role is None:
+                failed.append(item["name"])
+                continue
+            try:
+                await ctx.author.add_roles(role)
+            except discord.Forbidden:
+                failed.append(item["name"])
+                continue
+            owned.append(key)
+            granted.append(item["name"])
+
+        granted_cost = sum(unowned[k]["price"] for k in owned if k in unowned)
+        old_level, new_level = apply_xp_change(levels, user_id, -granted_cost)
+        save_levels(levels)
+        save_shop_purchases(purchases)
+
+        summary = f"👑 {ctx.author.mention} bought **{len(granted)} items** for **{granted_cost} XP**."
+        if failed:
+            summary += f"\n⚠️ Failed on {len(failed)} (permissions issue — check role hierarchy, not charged for these): {', '.join(failed[:10])}{'...' if len(failed) > 10 else ''}"
+        await msg.edit(content=summary)
+
+        if new_level < old_level:
+            await update_level_role(ctx.author, new_level)
+        return
+
+    if item_key not in SHOP_ITEMS:
+        await ctx.send(f"That's not in the shop. Use `!shop` to see what's available.")
+        return
+
+    purchases = load_shop_purchases()
+    guild_id = str(ctx.guild.id)
+    user_id = str(ctx.author.id)
+    purchases.setdefault(guild_id, {}).setdefault(user_id, [])
+
+    if item_key in purchases[guild_id][user_id]:
+        await ctx.send(f"You already own **{SHOP_ITEMS[item_key]['name']}**!")
+        return
+
+    item = SHOP_ITEMS[item_key]
+    levels = load_levels()
+    user_xp = get_total_xp(levels, user_id)
+
+    if user_xp < item["price"]:
+        await ctx.send(f"You need **{item['price']} XP** for {item['name']} — you have **{user_xp} XP**.")
+        return
+
+    role = await get_or_create_shop_role(ctx.guild, item_key)
+    if role is None:
+        await ctx.send("⚠️ I don't have permission to create/assign that role here — ask a server admin to give me the **Manage Roles** permission.")
+        return
+
+    old_level, new_level = apply_xp_change(levels, user_id, -item["price"])
+    save_levels(levels)
+
+    try:
+        await ctx.author.add_roles(role)
+    except discord.Forbidden:
+        # Refund if the role couldn't actually be assigned
+        apply_xp_change(levels, user_id, item["price"])
+        save_levels(levels)
+        await ctx.send("⚠️ Couldn't assign that role (permissions issue) — you've been refunded.")
+        return
+
+    purchases[guild_id][user_id].append(item_key)
+    save_shop_purchases(purchases)
+
+    await ctx.send(f"🛍️ {ctx.author.mention} bought **{item['name']}** for **{item['price']} XP**!")
+
+    if new_level < old_level:
+        await update_level_role(ctx.author, new_level)
+
+
 def build_server_embeds():
     """Builds the list of dark-red styled embeds showing every server + its owner. Returns a list of embeds."""
     guilds = bot.guilds
@@ -1254,8 +1570,59 @@ async def servers(ctx):
     if ctx.guild:  # only try to confirm in-channel if this wasn't already a DM
         await ctx.send("📩 Sent you the full list in DMs!")
 
-    if ctx.guild:  # only try to confirm in-channel if this wasn't already a DM
-        await ctx.send("📩 Sent you the full list in DMs!")
+
+class RemoveServerSelect(discord.ui.Select):
+    """One dropdown of up to 25 servers. RemoveServerView chains several of these together if the bot is in more than 25."""
+
+    def __init__(self, guilds_chunk, label_suffix=""):
+        options = [
+            discord.SelectOption(
+                label=guild.name[:100],
+                description=f"{guild.member_count} members • ID: {guild.id}",
+                value=str(guild.id),
+            )
+            for guild in guilds_chunk
+        ]
+        super().__init__(
+            placeholder=f"Choose a server to remove me from{label_suffix}...",
+            options=options,
+            min_values=1,
+            max_values=1,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        guild_id = int(self.values[0])
+        target_guild = bot.get_guild(guild_id)
+
+        if target_guild is None:
+            await interaction.response.edit_message(content=f"⚠️ I'm not in that server anymore (or already left it).", view=None)
+            return
+
+        guild_name = target_guild.name
+        await target_guild.leave()
+        await interaction.response.edit_message(content=f"🚪 Left **{guild_name}** (`{guild_id}`) as requested.", view=None)
+
+
+class RemoveServerView(discord.ui.View):
+    """DMed to the owner when they hit Remove Server on the website. Splits into multiple dropdowns if needed (25 servers per menu, 5 menus max = 125 servers)."""
+
+    def __init__(self, guilds):
+        super().__init__(timeout=300)
+        chunk_size = 25
+        chunks = [guilds[i:i + chunk_size] for i in range(0, len(guilds), chunk_size)]
+        for idx, chunk in enumerate(chunks[:5]):  # Discord caps a view at 5 action rows
+            suffix = f" (menu {idx + 1})" if len(chunks) > 1 else ""
+            self.add_item(RemoveServerSelect(chunk, suffix))
+
+
+async def send_remove_server_menu_dm(user):
+    """DMs the owner an interactive dropdown to pick which server to leave. Used by the website's Moderation > Remove Server button."""
+    guilds = bot.guilds
+    if not guilds:
+        await user.send("I'm not in any servers right now.")
+        return
+    view = RemoveServerView(guilds)
+    await user.send(f"🛡️ **Moderation — Remove Server**\nPick a server below and I'll leave it immediately.", view=view)
 
 
 bot.run(TOKEN)
