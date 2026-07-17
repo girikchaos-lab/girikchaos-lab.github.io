@@ -84,15 +84,18 @@ async def ensure_level_roles(guild):
 # Shop items — 100 cosmetic color roles across 6 tiers, purchasable with XP. Bot auto-creates them per-server, same pattern as level roles.
 # Each tuple is (key, display name, hex color). Tier controls price and the emoji shown.
 SHOP_TIERS = {
-    "common":    {"emoji": "⚪", "price": 800,   "count": 150},
-    "uncommon":  {"emoji": "🔵", "price": 2000,  "count": 200},
-    "rare":      {"emoji": "🟣", "price": 5000,  "count": 250},
-    "epic":      {"emoji": "🟠", "price": 10000, "count": 200},
-    "legendary": {"emoji": "🟡", "price": 20000, "count": 150},
-    "mythic":    {"emoji": "🔴", "price": 40000, "count": 50},
+    "common":    {"emoji": "⚪", "price": 800,   "count": 15},
+    "uncommon":  {"emoji": "🔵", "price": 2000,  "count": 20},
+    "rare":      {"emoji": "🟣", "price": 5000,  "count": 25},
+    "epic":      {"emoji": "🟠", "price": 10000, "count": 20},
+    "legendary": {"emoji": "🟡", "price": 20000, "count": 15},
+    "mythic":    {"emoji": "🔴", "price": 40000, "count": 5},
 }
-# Tier counts sum to 1000. Each tier also has fixed saturation/lightness so mythic reads as
-# vivid/rich and common reads as muted, while the hue still varies item to item.
+# Tier counts sum to 100 — deliberately small. Discord caps every server at 250 roles TOTAL
+# (including @everyone, the bot's own role, your level-tier roles, etc.), so 1000 was never
+# actually possible — this leaves ~150 roles of headroom for everything else in the server.
+# Each tier also has fixed saturation/lightness so mythic reads as vivid/rich and common reads
+# as muted, while the hue still varies item to item.
 _TIER_COLOR_PARAMS = {
     "common":    {"s": 0.45, "l": 0.55},
     "uncommon":  {"s": 0.55, "l": 0.50},
@@ -164,15 +167,23 @@ def save_shop_purchases(data):
 
 
 async def get_or_create_shop_role(guild, item_key):
-    """Gets this shop item's role in the guild, creating it if it doesn't exist yet. Returns the role, or None if creation failed."""
+    """Gets this shop item's role in the guild, creating it if it doesn't exist yet.
+    Returns (role, error_reason). role is None on failure; error_reason explains why."""
     item = SHOP_ITEMS[item_key]
     role = discord.utils.get(guild.roles, name=item["name"])
-    if role is None:
-        try:
-            role = await guild.create_role(name=item["name"], color=item["color"], reason="Auto-created shop item role")
-        except discord.Forbidden:
-            return None
-    return role
+    if role is not None:
+        return role, None
+
+    if len(guild.roles) >= 250:
+        return None, "role_limit"  # Discord's hard server-wide cap — nothing we can do but free up roles
+
+    try:
+        role = await guild.create_role(name=item["name"], color=item["color"], reason="Auto-created shop item role")
+        return role, None
+    except discord.Forbidden:
+        return None, "permissions"
+    except discord.HTTPException:
+        return None, "role_limit"
 
 
 WARNINGS_FILE = "warnings.json"
@@ -446,7 +457,13 @@ async def on_guild_remove(guild):
 @bot.event
 async def on_guild_join(guild):
     """Runs whenever the bot is added to a new server — auto-creates the level tier roles,
-    unless invites are currently paused, in which case the bot immediately leaves instead."""
+    unless invites are currently paused or this specific server is banned, in which case the bot leaves instead."""
+    banned = load_banned_servers()
+    if str(guild.id) in banned:
+        print(f"🚫 {guild.name} is on the ban list — leaving immediately.")
+        await guild.leave()
+        return
+
     settings = load_bot_settings()
 
     if not settings.get("invite_enabled", True):
@@ -489,6 +506,12 @@ async def on_message(message):
 
                 elif content == "OWNER_REMOVE_SERVER_MENU_REQUEST":
                     await send_remove_server_menu_dm(owner_user)
+
+                elif content == "OWNER_BAN_SERVER_MENU_REQUEST":
+                    await send_ban_server_menu_dm(owner_user)
+
+                elif content == "OWNER_UNBAN_SERVER_MENU_REQUEST":
+                    await send_unban_server_menu_dm(owner_user)
 
                 elif content == "PAUSE_INVITES_REQUEST":
                     settings = load_bot_settings()
@@ -1439,12 +1462,17 @@ async def buy(ctx, item_key: str):
             return
 
         granted, failed = [], []
+        hit_role_limit = False
         msg = await ctx.send(f"👑 Buying all {len(unowned)} remaining shop items for **{total_cost} XP**, hang tight...")
 
         for key, item in unowned.items():
-            role = await get_or_create_shop_role(ctx.guild, key)
+            if hit_role_limit:
+                break
+            role, error_reason = await get_or_create_shop_role(ctx.guild, key)
             if role is None:
                 failed.append(item["name"])
+                if error_reason == "role_limit":
+                    hit_role_limit = True  # no point trying more — the server's out of role slots
                 continue
             try:
                 await ctx.author.add_roles(role)
@@ -1460,7 +1488,9 @@ async def buy(ctx, item_key: str):
         save_shop_purchases(purchases)
 
         summary = f"👑 {ctx.author.mention} bought **{len(granted)} items** for **{granted_cost} XP**."
-        if failed:
+        if hit_role_limit:
+            summary += f"\n🚫 Stopped early — this server hit Discord's 250-role limit. {len(failed)} items weren't created. Delete some unused roles to free up space."
+        elif failed:
             summary += f"\n⚠️ Failed on {len(failed)} (permissions issue — check role hierarchy, not charged for these): {', '.join(failed[:10])}{'...' if len(failed) > 10 else ''}"
         await msg.edit(content=summary)
 
@@ -1489,9 +1519,12 @@ async def buy(ctx, item_key: str):
         await ctx.send(f"You need **{item['price']} XP** for {item['name']} — you have **{user_xp} XP**.")
         return
 
-    role = await get_or_create_shop_role(ctx.guild, item_key)
+    role, error_reason = await get_or_create_shop_role(ctx.guild, item_key)
     if role is None:
-        await ctx.send("⚠️ I don't have permission to create/assign that role here — ask a server admin to give me the **Manage Roles** permission.")
+        if error_reason == "role_limit":
+            await ctx.send("🚫 This server has hit Discord's 250-role limit, so I can't create any new roles. Delete some unused roles first.")
+        else:
+            await ctx.send("⚠️ I don't have permission to create/assign that role here — ask a server admin to give me the **Manage Roles** permission.")
         return
 
     old_level, new_level = apply_xp_change(levels, user_id, -item["price"])
@@ -1623,6 +1656,126 @@ async def send_remove_server_menu_dm(user):
         return
     view = RemoveServerView(guilds)
     await user.send(f"🛡️ **Moderation — Remove Server**\nPick a server below and I'll leave it immediately.", view=view)
+
+
+# ===================== Ban / Unban servers =====================
+BANNED_SERVERS_FILE = "banned_servers.json"
+
+
+def load_banned_servers():
+    """Returns {guild_id_str: {"name": ..., "banned_at": ...}}, or {} if the file doesn't exist/is unreadable."""
+    if os.path.exists(BANNED_SERVERS_FILE):
+        with open(BANNED_SERVERS_FILE, "r") as f:
+            try:
+                return json.load(f)
+            except json.JSONDecodeError:
+                return {}
+    return {}
+
+
+def save_banned_servers(data):
+    with open(BANNED_SERVERS_FILE, "w") as f:
+        json.dump(data, f, indent=4)
+
+
+class BanServerSelect(discord.ui.Select):
+    """Pick a currently-joined server to ban — bans it AND leaves it immediately."""
+
+    def __init__(self, guilds_chunk, label_suffix=""):
+        options = [
+            discord.SelectOption(
+                label=guild.name[:100],
+                description=f"{guild.member_count} members • ID: {guild.id}",
+                value=str(guild.id),
+            )
+            for guild in guilds_chunk
+        ]
+        super().__init__(placeholder=f"Choose a server to ban{label_suffix}...", options=options, min_values=1, max_values=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        guild_id = int(self.values[0])
+        target_guild = bot.get_guild(guild_id)
+        if target_guild is None:
+            await interaction.response.edit_message(content="⚠️ I'm not in that server anymore.", view=None)
+            return
+
+        guild_name = target_guild.name
+        banned = load_banned_servers()
+        banned[str(guild_id)] = {"name": guild_name, "banned_at": time.time()}
+        save_banned_servers(banned)
+        await target_guild.leave()
+
+        await interaction.response.edit_message(
+            content=f"🚫 Banned **{guild_name}** (`{guild_id}`) and left it. I won't rejoin unless you unban it.",
+            view=None,
+        )
+
+
+class BanServerView(discord.ui.View):
+    def __init__(self, guilds):
+        super().__init__(timeout=300)
+        chunk_size = 25
+        chunks = [guilds[i:i + chunk_size] for i in range(0, len(guilds), chunk_size)]
+        for idx, chunk in enumerate(chunks[:5]):
+            suffix = f" (menu {idx + 1})" if len(chunks) > 1 else ""
+            self.add_item(BanServerSelect(chunk, suffix))
+
+
+async def send_ban_server_menu_dm(user):
+    """DMs the owner a dropdown to pick which currently-joined server to ban + leave."""
+    guilds = bot.guilds
+    if not guilds:
+        await user.send("I'm not in any servers right now.")
+        return
+    view = BanServerView(guilds)
+    await user.send("🛡️ **Moderation — Ban Server**\nPick a server below — I'll ban it and leave immediately.", view=view)
+
+
+class UnbanServerSelect(discord.ui.Select):
+    """Pick a banned server (built from stored records, since the bot isn't in these anymore) to unban."""
+
+    def __init__(self, entries_chunk, label_suffix=""):
+        options = [
+            discord.SelectOption(label=name[:100], description=f"ID: {guild_id}", value=guild_id)
+            for guild_id, name in entries_chunk
+        ]
+        super().__init__(placeholder=f"Choose a server to unban{label_suffix}...", options=options, min_values=1, max_values=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        guild_id = self.values[0]
+        banned = load_banned_servers()
+        entry = banned.pop(guild_id, None)
+        save_banned_servers(banned)
+
+        if entry is None:
+            await interaction.response.edit_message(content="⚠️ That server's already unbanned.", view=None)
+            return
+
+        await interaction.response.edit_message(
+            content=f"✅ Unbanned **{entry['name']}** (`{guild_id}`). I can be invited back there now.",
+            view=None,
+        )
+
+
+class UnbanServerView(discord.ui.View):
+    def __init__(self, entries):
+        super().__init__(timeout=300)
+        chunk_size = 25
+        chunks = [entries[i:i + chunk_size] for i in range(0, len(entries), chunk_size)]
+        for idx, chunk in enumerate(chunks[:5]):
+            suffix = f" (menu {idx + 1})" if len(chunks) > 1 else ""
+            self.add_item(UnbanServerSelect(chunk, suffix))
+
+
+async def send_unban_server_menu_dm(user):
+    """DMs the owner a dropdown of currently-banned servers to pick one to unban."""
+    banned = load_banned_servers()
+    if not banned:
+        await user.send("You don't have any banned servers right now.")
+        return
+    entries = [(guild_id, data["name"]) for guild_id, data in banned.items()]
+    view = UnbanServerView(entries)
+    await user.send("🛡️ **Moderation — Unban Server**\nPick a server below to lift its ban.", view=view)
 
 
 bot.run(TOKEN)
