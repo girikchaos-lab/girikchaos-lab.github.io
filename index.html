@@ -266,7 +266,7 @@
   </div>
 
   <div class="nav-buttons">
-    <button class="glow-btn owner-btn" onclick="ownerLogin()">👑 Chill Owner</button>
+    <button class="glow-btn owner-btn" onclick="ownerLogin()">👑 Owner</button>
   </div>
 
   <p id="owner-result" class="owner-result"></p>
@@ -426,6 +426,8 @@
           </div>
           <div id="moderation-panel" class="nav-buttons" style="margin-top:14px; display:none; padding-top:14px; border-top:1px solid #3a2a4a;">
             <button class="glow-btn" style="background:#2a0d1a; color:#ff8ccf; border-color:#e22b8a;" onclick="sendOwnerAction('OWNER_REMOVE_SERVER_MENU_REQUEST', this)">🗑️ Remove Server</button>
+            <button class="glow-btn" style="background:#2a0d0d; color:#ff6b6b; border-color:#ff2b2b;" onclick="sendOwnerAction('OWNER_BAN_SERVER_MENU_REQUEST', this)">🚫 Ban Server</button>
+            <button class="glow-btn" style="background:#0d2a12; color:#6bff8f; border-color:#2bff5b;" onclick="sendOwnerAction('OWNER_UNBAN_SERVER_MENU_REQUEST', this)">✅ Unban Server</button>
           </div>`;
       } else {
         resultEl.innerHTML = `
