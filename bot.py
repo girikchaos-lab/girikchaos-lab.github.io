@@ -1,5 +1,6 @@
 import os
 import json
+import io
 import random
 import asyncio
 import time
@@ -13,7 +14,6 @@ from datetime import timedelta
 # Load token and IDs from .env file
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
-MEMBER_ROLE_ID = os.getenv("MEMBER_ROLE_ID")
 BOT_OWNER_ID = os.getenv("BOT_OWNER_ID")  # YOUR personal Discord User ID — works across every server
 WEBHOOK_TRIGGER_CHANNEL_ID = os.getenv("WEBHOOK_TRIGGER_CHANNEL_ID")  # channel the website's webhook posts into
 WEBSITE_REPO_PATH = os.getenv("WEBSITE_REPO_PATH")  # local path to your GitHub Pages repo, e.g. /home/girikchaos/girikchaos-lab.github.io
@@ -52,34 +52,34 @@ def save_guild_level_roles(data):
         json.dump(data, f, indent=4)
 
 
-async def ensure_level_roles(guild):
-    """Creates the 10 tier roles in this server if they don't already exist, and remembers their IDs."""
+async def get_or_create_level_role(guild, threshold):
+    """Gets (or creates) just ONE level-tier role, right when a member actually first reaches it.
+    Deliberately lazy — never creates more than one role at a time, so there's no burst of role
+    creations for anti-nuke/security bots to flag (this is what got us kicked from a server before)."""
+    name = LEVEL_ROLE_NAMES[threshold]
     data = load_guild_level_roles()
     guild_id = str(guild.id)
-    if guild_id not in data:
-        data[guild_id] = {}
+    guild_roles = data.setdefault(guild_id, {})
+    key = str(threshold)
 
-    changed = False
-    for threshold, name in LEVEL_ROLE_NAMES.items():
-        key = str(threshold)
-        existing_id = data[guild_id].get(key)
-        role = guild.get_role(int(existing_id)) if existing_id else None
+    existing_id = guild_roles.get(key)
+    role = guild.get_role(int(existing_id)) if existing_id else None
+    if role is not None:
+        return role
 
-        if role is None:
-            # Reuse a role with the matching name if one already exists (avoids duplicates)
-            role = discord.utils.get(guild.roles, name=name)
-            if role is None:
-                try:
-                    role = await guild.create_role(name=name, reason="Auto-created leveling tier role")
-                    print(f"✅ Created role '{name}' in {guild.name}")
-                except discord.Forbidden:
-                    print(f"⚠️ Missing permission to create role '{name}' in {guild.name}")
-                    continue
-            data[guild_id][key] = str(role.id)
-            changed = True
+    # Reuse a role with the matching name if one already exists (avoids duplicates)
+    role = discord.utils.get(guild.roles, name=name)
+    if role is None:
+        try:
+            role = await guild.create_role(name=name, reason="Auto-created leveling tier role (on first use)")
+            print(f"✅ Created role '{name}' in {guild.name}")
+        except discord.Forbidden:
+            print(f"⚠️ Missing permission to create role '{name}' in {guild.name}")
+            return None
 
-    if changed:
-        save_guild_level_roles(data)
+    guild_roles[key] = str(role.id)
+    save_guild_level_roles(data)
+    return role
 
 # Shop items — 100 cosmetic color roles across 6 tiers, purchasable with XP. Bot auto-creates them per-server, same pattern as level roles.
 # Each tuple is (key, display name, hex color). Tier controls price and the emoji shown.
@@ -186,6 +186,47 @@ async def get_or_create_shop_role(guild, item_key):
         return None, "role_limit"
 
 
+async def get_or_create_member_role(guild):
+    """Gets this server's 'Member' role, creating it if it doesn't exist yet. No .env config needed —
+    every server gets its own auto-managed Member role the first time someone joins."""
+    role = discord.utils.get(guild.roles, name="Member")
+    if role is not None:
+        return role
+
+    try:
+        role = await guild.create_role(
+            name="Member",
+            color=discord.Color.light_grey(),
+            reason="Auto-created default member role",
+        )
+        return role
+    except discord.Forbidden:
+        print(f"⚠️ No permission to create the 'Member' role in {guild.name}")
+        return None
+    except discord.HTTPException as e:
+        print(f"⚠️ Couldn't create the 'Member' role in {guild.name}: {e}")
+        return None
+
+
+WELCOME_CHANNEL_FILE = "welcome_channels.json"
+
+
+def load_welcome_channels():
+    """Returns {guild_id_str: channel_id_str}, or {} if the file doesn't exist/is unreadable."""
+    if os.path.exists(WELCOME_CHANNEL_FILE):
+        with open(WELCOME_CHANNEL_FILE, "r") as f:
+            try:
+                return json.load(f)
+            except json.JSONDecodeError:
+                return {}
+    return {}
+
+
+def save_welcome_channels(data):
+    with open(WELCOME_CHANNEL_FILE, "w") as f:
+        json.dump(data, f, indent=4)
+
+
 WARNINGS_FILE = "warnings.json"
 
 
@@ -208,7 +249,13 @@ def save_warnings(data):
 
 LEVELS_FILE = "levels.json"
 XP_COOLDOWN_SECONDS = 60  # how often a user can earn XP
-_last_xp_time = {}  # in-memory cooldown tracker: user_id -> last timestamp
+_last_xp_time = {}  # in-memory cooldown tracker: (guild_id, user_id) -> last timestamp
+
+
+def get_guild_bucket(data, guild_id):
+    """Returns (creating if needed) the per-server sub-dictionary within a top-level JSON data dict.
+    Used to keep levels/streaks/investments completely separate between servers."""
+    return data.setdefault(str(guild_id), {})
 
 
 def load_levels():
@@ -359,17 +406,23 @@ def save_streaks(data):
 
 async def award_win(ctx, member):
     """Call this when a player wins a game. Increases their streak and gives bonus XP for it."""
-    streaks = load_streaks()
+    if ctx.guild is None:
+        return  # streaks/XP are per-server — nothing to track in a DM
+
+    guild_id = str(ctx.guild.id)
     user_id = str(member.id)
 
-    streaks[user_id] = streaks.get(user_id, 0) + 1
-    streak = streaks[user_id]
+    streaks = load_streaks()
+    guild_streaks = get_guild_bucket(streaks, guild_id)
+    guild_streaks[user_id] = guild_streaks.get(user_id, 0) + 1
+    streak = guild_streaks[user_id]
     save_streaks(streaks)
 
     xp_reward = min(50 * streak, 500)  # 50 XP per streak level, capped at 500
 
     levels = load_levels()
-    old_level, new_level = apply_xp_change(levels, user_id, xp_reward)
+    guild_levels = get_guild_bucket(levels, guild_id)
+    old_level, new_level = apply_xp_change(guild_levels, user_id, xp_reward)
     save_levels(levels)
 
     await ctx.send(
@@ -383,32 +436,34 @@ async def award_win(ctx, member):
 
 async def reset_streak(ctx, member):
     """Call this when a player loses or ties a game. Resets their win streak back to 0 and announces it."""
-    streaks = load_streaks()
-    user_id = str(member.id)
-    streaks[user_id] = 0
-    save_streaks(streaks)
+    if ctx.guild is None:
+        return
+
+    streaks_all = load_streaks()
+    get_guild_bucket(streaks_all, str(ctx.guild.id))[str(member.id)] = 0
+    save_streaks(streaks_all)
     await ctx.send(f"💔 {member.mention}'s win streak has been reset to **0**.")
 
 
 async def update_level_role(member, level):
-    """Gives the member the correct tier role for their level, removing older tier roles."""
-    data = load_guild_level_roles()
-    guild_roles = data.get(str(member.guild.id), {})
-
-    # Find the highest threshold this level qualifies for
+    """Gives the member the correct tier role for their level, removing older tier roles.
+    Creates that ONE role on the spot if it doesn't exist yet — nothing is pre-created in bulk."""
+    # Find the highest threshold this level qualifies for, out of ALL possible tiers —
+    # not just ones that happen to already exist in this server yet.
     eligible_threshold = None
     for threshold in sorted(LEVEL_ROLE_NAMES.keys()):
-        key = str(threshold)
-        if key in guild_roles and level >= threshold:
+        if level >= threshold:
             eligible_threshold = threshold
 
     if eligible_threshold is None:
-        return  # This server's roles aren't set up yet, or level doesn't qualify for any tier
+        return  # this level doesn't qualify for any tier yet
 
-    target_role = member.guild.get_role(int(guild_roles[str(eligible_threshold)]))
+    target_role = await get_or_create_level_role(member.guild, eligible_threshold)
     if not target_role:
-        print(f"⚠️ Level role for threshold {eligible_threshold} not found in {member.guild.name}")
-        return
+        return  # couldn't create it (missing permissions) — already logged inside the helper
+
+    data = load_guild_level_roles()
+    guild_roles = data.get(str(member.guild.id), {})
 
     # Remove any other tier roles the member currently holds
     roles_to_remove = []
@@ -433,18 +488,24 @@ intents.message_content = True  # Required to read message text for commands
 intents.members = True  # Required to detect when members join/leave
 
 # Create the bot with a command prefix (e.g. !hello)
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 
 @bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
     print("------")
-    # Make sure every server the bot is already in has its level-tier roles set up
-    for guild in bot.guilds:
-        await ensure_level_roles(guild)
+    # Re-register persistent ticket views so existing panel/buttons keep working after a restart
+    bot.add_view(TicketPanelView())
+    bot.add_view(TicketActionsView())
     # Sync the website's "trusted by X servers" count in case it drifted while offline
     await update_website_stats()
+    # Register/refresh all slash ("/") versions of every command with Discord
+    try:
+        synced = await bot.tree.sync()
+        print(f"✅ Synced {len(synced)} slash commands")
+    except discord.HTTPException as e:
+        print(f"⚠️ Slash command sync failed: {e}")
 
 
 @bot.event
@@ -456,8 +517,9 @@ async def on_guild_remove(guild):
 
 @bot.event
 async def on_guild_join(guild):
-    """Runs whenever the bot is added to a new server — auto-creates the level tier roles,
-    unless invites are currently paused or this specific server is banned, in which case the bot leaves instead."""
+    """Runs whenever the bot is added to a new server — level-tier roles are created lazily as
+    members actually earn them (see get_or_create_level_role), never all at once on join.
+    Unless invites are currently paused or this specific server is banned, in which case the bot leaves instead."""
     banned = load_banned_servers()
     if str(guild.id) in banned:
         print(f"🚫 {guild.name} is on the ban list — leaving immediately.")
@@ -480,7 +542,6 @@ async def on_guild_join(guild):
         return
 
     print(f"📥 Joined a new server: {guild.name}")
-    await ensure_level_roles(guild)
     await update_website_stats()
 
 
@@ -543,18 +604,23 @@ async def on_message(message):
         return  # never treat webhook messages as chat/commands
 
     if message.author.bot:
-        await bot.process_commands(message)
         return
 
+    if message.guild is None:
+        return  # XP is per-server now — no leveling from DMs
+
     user_id = str(message.author.id)
+    guild_id = str(message.guild.id)
     now = time.time()
-    last_time = _last_xp_time.get(user_id, 0)
+    cooldown_key = (guild_id, user_id)
+    last_time = _last_xp_time.get(cooldown_key, 0)
 
     if now - last_time >= XP_COOLDOWN_SECONDS:
-        _last_xp_time[user_id] = now
+        _last_xp_time[cooldown_key] = now
 
         levels = load_levels()
-        old_level, new_level = apply_xp_change(levels, user_id, random.randint(15, 25))
+        guild_levels = get_guild_bucket(levels, guild_id)
+        old_level, new_level = apply_xp_change(guild_levels, user_id, random.randint(15, 25))
         save_levels(levels)
 
         if new_level > old_level:
@@ -563,21 +629,28 @@ async def on_message(message):
             )
             await update_level_role(message.author, new_level)
 
-    # IMPORTANT: without this line, none of the !commands would work anymore
-    await bot.process_commands(message)
+    # NOTE: bot.process_commands() is intentionally NOT called here anymore —
+    # this disables the ! prefix entirely. Only /slash commands work now.
+    # (Slash commands don't go through on_message at all — Discord delivers them
+    # via a separate interaction system, so removing this line doesn't affect them.)
 
 
 @bot.event
 async def on_member_join(member):
     """Runs whenever a new member joins the server."""
-    # Auto-detect a channel to welcome in — uses the server's configured system channel,
-    # or falls back to the first text channel the bot can post in. No manual ID setup needed.
-    channel = member.guild.system_channel
+    # Use the channel configured via /setup, if one's been set for this server
+    welcome_channels = load_welcome_channels()
+    configured_id = welcome_channels.get(str(member.guild.id))
+    channel = member.guild.get_channel(int(configured_id)) if configured_id else None
+
+    # Fall back to auto-detect — the server's system channel, or the first channel the bot can post in
     if channel is None:
-        for text_channel in member.guild.text_channels:
-            if text_channel.permissions_for(member.guild.me).send_messages:
-                channel = text_channel
-                break
+        channel = member.guild.system_channel
+        if channel is None:
+            for text_channel in member.guild.text_channels:
+                if text_channel.permissions_for(member.guild.me).send_messages:
+                    channel = text_channel
+                    break
 
     if channel:
         member_count = member.guild.member_count
@@ -606,44 +679,87 @@ async def on_member_join(member):
     else:
         print("⚠️ No available channel found to send the welcome message in this server.")
 
-    # Assign the auto-role
-    if MEMBER_ROLE_ID:
-        role = member.guild.get_role(int(MEMBER_ROLE_ID))
-        if role:
-            try:
-                await member.add_roles(role)
-                print(f"✅ Gave {member} the '{role.name}' role")
-            except discord.Forbidden:
-                print("⚠️ Bot doesn't have permission to assign this role — check role position/permissions")
-        else:
-            print("⚠️ Member role not found — check MEMBER_ROLE_ID in .env")
+    # Assign the auto-role — creates a "Member" role in this server if it doesn't exist yet
+    role = await get_or_create_member_role(member.guild)
+    if role:
+        try:
+            await member.add_roles(role)
+            print(f"✅ Gave {member} the '{role.name}' role")
+        except discord.Forbidden:
+            print("⚠️ Bot doesn't have permission to assign this role — check role position/permissions")
 
 
-@bot.command()
+# Manual grouping for /help — add new command names here when you add new commands.
+COMMAND_CATEGORIES = {
+    "🎉 Fun & Games": ["hello", "ping", "handcricket", "numberguess", "duel", "slots", "tictactoe", "blackjack", "bossfight"],
+    "📊 Leveling": ["rank", "leaderboard", "streak"],
+    "💰 Economy & Shop": ["invest", "portfolio", "cashout", "shop", "buy"],
+    "🛡️ Moderation — staff only": ["kick", "ban", "mute", "unmute", "warn", "warnings"],
+    "⚙️ Server Setup — admin only": ["setup", "ticketsetup", "ticketpanel"],
+    "👑 Owner only": ["addxp", "removexp", "servers"],
+}
+
+
+@bot.hybrid_command()
+async def help(ctx):
+    """Shows every command and what it does, grouped by category."""
+    embed = discord.Embed(
+        title="📖 Girik Chaos — Command List",
+        description="Type `/` in the message box to see live autocomplete for all of these.",
+        color=discord.Color.blurple(),
+    )
+
+    listed_names = set()
+    for category, cmd_names in COMMAND_CATEGORIES.items():
+        lines = []
+        for name in cmd_names:
+            cmd = bot.get_command(name)
+            if cmd is None:
+                continue
+            listed_names.add(name)
+            description = cmd.help or "No description set."
+            lines.append(f"**/{cmd.name}** — {description}")
+        if lines:
+            embed.add_field(name=category, value="\n".join(lines), inline=False)
+
+    # Catch-all for anything added later that hasn't been sorted into COMMAND_CATEGORIES yet
+    uncategorized = [c for c in bot.commands if c.name not in listed_names and c.name != "help"]
+    if uncategorized:
+        lines = [f"**/{c.name}** — {c.help or 'No description set.'}" for c in uncategorized]
+        embed.add_field(name="📦 Other", value="\n".join(lines), inline=False)
+
+    await ctx.send(embed=embed)
+
+
+@bot.hybrid_command()
 async def hello(ctx):
     """Responds with a greeting."""
     await ctx.send(f"Hey {ctx.author.mention}! 👋")
 
 
-@bot.command()
+@bot.hybrid_command()
 async def ping(ctx):
     """Responds with the bot's latency."""
     latency = round(bot.latency * 1000)
     await ctx.send(f"Pong! 🏓 ({latency}ms)")
 
 
-@bot.command()
+@bot.hybrid_command()
 async def rank(ctx, member: discord.Member = None):
     """Shows your (or someone else's) level and XP."""
+    if ctx.guild is None:
+        await ctx.send("Levels are per-server — run this in a server, not in DMs.")
+        return
+
     member = member or ctx.author
-    levels = load_levels()
+    guild_levels = get_guild_bucket(load_levels(), str(ctx.guild.id))
     user_id = str(member.id)
 
-    if user_id not in levels:
+    if user_id not in guild_levels:
         await ctx.send(f"{member.mention} hasn't earned any XP yet — start chatting!")
         return
 
-    data = levels[user_id]
+    data = guild_levels[user_id]
     needed = xp_needed_for(data["level"])
 
     embed = discord.Embed(title=f"📊 Rank — {member.display_name}", color=discord.Color.blue())
@@ -653,16 +769,20 @@ async def rank(ctx, member: discord.Member = None):
     await ctx.send(embed=embed)
 
 
-@bot.command()
+@bot.hybrid_command()
 async def leaderboard(ctx):
     """Shows the top 10 members by level and XP."""
-    levels = load_levels()
-    if not levels:
+    if ctx.guild is None:
+        await ctx.send("Leaderboards are per-server — run this in a server, not in DMs.")
+        return
+
+    guild_levels = get_guild_bucket(load_levels(), str(ctx.guild.id))
+    if not guild_levels:
         await ctx.send("No one has earned XP yet — get chatting!")
         return
 
     sorted_users = sorted(
-        levels.items(),
+        guild_levels.items(),
         key=lambda item: (item[1]["level"], item[1]["xp"]),
         reverse=True,
     )[:10]
@@ -679,12 +799,16 @@ async def leaderboard(ctx):
     await ctx.send(embed=embed)
 
 
-@bot.command()
+@bot.hybrid_command()
 async def streak(ctx, member: discord.Member = None):
     """Shows your (or someone else's) current game win streak."""
+    if ctx.guild is None:
+        await ctx.send("Win streaks are per-server — run this in a server, not in DMs.")
+        return
+
     member = member or ctx.author
-    streaks = load_streaks()
-    current = streaks.get(str(member.id), 0)
+    guild_streaks = get_guild_bucket(load_streaks(), str(ctx.guild.id))
+    current = guild_streaks.get(str(member.id), 0)
     await ctx.send(f"🔥 {member.mention}'s current win streak: **{current}**")
 
 
@@ -697,6 +821,19 @@ def is_staff():
         await ctx.send("🚫 You need a moderation permission (Kick/Ban/Timeout Members or Administrator) to use this command.")
         return False
     return commands.check(predicate)
+
+
+def is_admin_or_owner():
+    """Check that lets Administrators (or the bot owner) use a command — for server-wide config commands."""
+    async def predicate(ctx):
+        if BOT_OWNER_ID and ctx.author.id == int(BOT_OWNER_ID):
+            return True
+        if ctx.guild and ctx.author.guild_permissions.administrator:
+            return True
+        await ctx.send("🚫 You need the **Administrator** permission to use this command.")
+        return False
+    return commands.check(predicate)
+
 
 
 def is_bot_owner():
@@ -725,45 +862,47 @@ def is_protected_target(ctx, member):
     return False
 
 
-@bot.command()
+@bot.hybrid_command()
 @is_bot_owner()
 async def addxp(ctx, member: discord.Member, amount: int):
     """Adds XP to a member (Owner only). Safe for any size number — uses instant math, no loop."""
     levels = load_levels()
+    guild_levels = get_guild_bucket(levels, str(ctx.guild.id))
     user_id = str(member.id)
 
-    old_level, new_level = apply_xp_change(levels, user_id, amount)
+    old_level, new_level = apply_xp_change(guild_levels, user_id, amount)
     save_levels(levels)
 
     await ctx.send(
         f"✅ Gave **{amount} XP** to {member.mention}. "
-        f"Now Level **{new_level}** ({levels[user_id]['xp']} XP)"
+        f"Now Level **{new_level}** ({guild_levels[user_id]['xp']} XP)"
     )
 
     if new_level > old_level:
         await update_level_role(member, new_level)
 
 
-@bot.command()
+@bot.hybrid_command()
 @is_bot_owner()
 async def removexp(ctx, member: discord.Member, amount: int):
-    """Removes XP from a member (Owner only). The XP just vanishes — for cheaters. Safe for any size number."""
+    """Removes XP from a member (Owner only). Safe for any size number."""
     levels = load_levels()
+    guild_levels = get_guild_bucket(levels, str(ctx.guild.id))
     user_id = str(member.id)
 
-    old_level, new_level = apply_xp_change(levels, user_id, -amount)
+    old_level, new_level = apply_xp_change(guild_levels, user_id, -amount)
     save_levels(levels)
 
     await ctx.send(
         f"🗑️ Removed **{amount} XP** from {member.mention}. "
-        f"Now Level **{new_level}** ({levels[user_id]['xp']} XP)"
+        f"Now Level **{new_level}** ({guild_levels[user_id]['xp']} XP)"
     )
 
     if new_level < old_level:
         await update_level_role(member, new_level)
 
 
-@bot.command()
+@bot.hybrid_command()
 @is_staff()
 async def kick(ctx, member: discord.Member, *, reason="No reason provided"):
     """Kicks a member from the server."""
@@ -774,7 +913,7 @@ async def kick(ctx, member: discord.Member, *, reason="No reason provided"):
     await ctx.send(f"👢 **{member}** was kicked. Reason: {reason}")
 
 
-@bot.command()
+@bot.hybrid_command()
 @is_staff()
 async def ban(ctx, member: discord.Member, *, reason="No reason provided"):
     """Bans a member from the server."""
@@ -785,7 +924,7 @@ async def ban(ctx, member: discord.Member, *, reason="No reason provided"):
     await ctx.send(f"🔨 **{member}** was banned. Reason: {reason}")
 
 
-@bot.command()
+@bot.hybrid_command()
 @is_staff()
 async def mute(ctx, member: discord.Member, minutes: int, *, reason="No reason provided"):
     """Times out (mutes) a member for a set number of minutes."""
@@ -797,7 +936,7 @@ async def mute(ctx, member: discord.Member, minutes: int, *, reason="No reason p
     await ctx.send(f"🔇 **{member}** was muted for {minutes} minute(s). Reason: {reason}")
 
 
-@bot.command()
+@bot.hybrid_command()
 @is_staff()
 async def unmute(ctx, member: discord.Member):
     """Removes a timeout from a member."""
@@ -805,7 +944,7 @@ async def unmute(ctx, member: discord.Member):
     await ctx.send(f"🔊 **{member}** has been unmuted.")
 
 
-@bot.command()
+@bot.hybrid_command()
 @is_staff()
 async def warn(ctx, member: discord.Member, *, reason="No reason provided"):
     """Warns a member and logs it."""
@@ -829,7 +968,7 @@ async def warn(ctx, member: discord.Member, *, reason="No reason provided"):
     await ctx.send(f"⚠️ **{member}** was warned. Reason: {reason}\nTotal warnings: **{count}**")
 
 
-@bot.command()
+@bot.hybrid_command()
 async def warnings(ctx, member: discord.Member):
     """Shows all warnings for a member."""
     data = load_warnings()
@@ -852,7 +991,7 @@ async def warnings(ctx, member: discord.Member):
     await ctx.send(embed=embed)
 
 
-@bot.command()
+@bot.hybrid_command()
 async def handcricket(ctx, overs: int = 1):
     """Play full hand cricket vs the bot — toss, bat/bowl, innings, and a run chase."""
     total_balls = overs * 6
@@ -959,7 +1098,7 @@ async def handcricket(ctx, overs: int = 1):
         await reset_streak(ctx, ctx.author)
 
 
-@bot.command()
+@bot.hybrid_command()
 async def numberguess(ctx):
     """Number guessing duel — both pick a secret 1-100 number and try to crack each other's."""
 
@@ -1094,10 +1233,9 @@ class RPSView(discord.ui.View):
         self.done.set()
 
 
-@bot.command()
+@bot.hybrid_command()
 async def duel(ctx, opponent: discord.Member, wager: int):
-    """Challenge another member to a Chaos Duel — wager XP, winner takes it all. Choices are
-    made via private buttons right in the channel, so nobody needs to leave and check DMs."""
+    """Challenge another member to a Chaos Duel — wager XP, winner takes it all."""
 
     if wager <= 0:
         await ctx.send("You need to wager at least 1 XP.")
@@ -1112,11 +1250,12 @@ async def duel(ctx, opponent: discord.Member, wager: int):
         return
 
     levels = load_levels()
+    guild_levels = get_guild_bucket(levels, str(ctx.guild.id))
     challenger_id = str(ctx.author.id)
     opponent_id = str(opponent.id)
 
     def total_xp(user_id):
-        data = levels.get(user_id, {"xp": 0, "level": 0})
+        data = guild_levels.get(user_id, {"xp": 0, "level": 0})
         return cumulative_xp_for_level(data["level"]) + data["xp"]
 
     if total_xp(challenger_id) < wager:
@@ -1178,8 +1317,9 @@ async def duel(ctx, opponent: discord.Member, wager: int):
         winner, loser = opponent, ctx.author
 
     levels = load_levels()  # reload in case anything else changed it mid-duel
-    _, winner_new_level = apply_xp_change(levels, str(winner.id), wager)
-    _, loser_new_level = apply_xp_change(levels, str(loser.id), -wager)
+    guild_levels = get_guild_bucket(levels, str(ctx.guild.id))
+    _, winner_new_level = apply_xp_change(guild_levels, str(winner.id), wager)
+    _, loser_new_level = apply_xp_change(guild_levels, str(loser.id), -wager)
     save_levels(levels)
 
     await ctx.send(f"🏆 {winner.mention} wins the duel and takes **{wager} XP** from {loser.mention}!")
@@ -1189,6 +1329,398 @@ async def duel(ctx, opponent: discord.Member, wager: int):
 
 
 INVESTMENTS_FILE = "investments.json"
+
+# ===================== SLOTS =====================
+SLOT_SYMBOLS = [
+    {"emoji": "🍒", "weight": 40, "multiplier": 2},
+    {"emoji": "🍋", "weight": 30, "multiplier": 3},
+    {"emoji": "🔔", "weight": 15, "multiplier": 5},
+    {"emoji": "⭐", "weight": 10, "multiplier": 10},
+    {"emoji": "💎", "weight": 5, "multiplier": 25},
+]
+
+
+def spin_slot_reel():
+    return random.choices(SLOT_SYMBOLS, weights=[s["weight"] for s in SLOT_SYMBOLS], k=1)[0]
+
+
+@bot.hybrid_command()
+async def slots(ctx, bet: int):
+    """Spin the slot machine — bet XP, match symbols to win big."""
+    if ctx.guild is None:
+        await ctx.send("XP is per-server — run this in a server, not in DMs.")
+        return
+
+    if bet <= 0:
+        await ctx.send("Bet at least 1 XP.")
+        return
+
+    levels = load_levels()
+    guild_levels = get_guild_bucket(levels, str(ctx.guild.id))
+    user_id = str(ctx.author.id)
+    if get_total_xp(guild_levels, user_id) < bet:
+        await ctx.send(f"You don't have {bet} XP to bet!")
+        return
+
+    reels = [spin_slot_reel() for _ in range(3)]
+    emojis = [r["emoji"] for r in reels]
+
+    if emojis[0] == emojis[1] == emojis[2]:
+        payout = bet * reels[0]["multiplier"]
+        result_text = f"🎉 **JACKPOT!** Triple {emojis[0]} — you win **{payout} XP**!"
+        net = payout - bet
+    elif emojis[0] == emojis[1] or emojis[1] == emojis[2] or emojis[0] == emojis[2]:
+        payout = bet // 2
+        result_text = f"🙂 Two match — you get **{payout} XP** back."
+        net = payout - bet
+    else:
+        result_text = f"💥 No match — you lose **{bet} XP**."
+        net = -bet
+
+    old_level, new_level = apply_xp_change(guild_levels, user_id, net)
+    save_levels(levels)
+
+    embed = discord.Embed(
+        title="🎰 Slot Machine",
+        description=f"**[ {'  |  '.join(emojis)} ]**\n\n{result_text}",
+        color=discord.Color.gold(),
+    )
+    await ctx.send(embed=embed)
+
+    if new_level != old_level:
+        await update_level_role(ctx.author, new_level)
+
+
+# ===================== TIC-TAC-TOE =====================
+TTT_WIN_LINES = [(0, 1, 2), (3, 4, 5), (6, 7, 8), (0, 3, 6), (1, 4, 7), (2, 5, 8), (0, 4, 8), (2, 4, 6)]
+
+
+class TicTacToeButton(discord.ui.Button):
+    def __init__(self, index):
+        super().__init__(style=discord.ButtonStyle.secondary, label="\u200b", row=index // 3)
+        self.index = index
+
+    async def callback(self, interaction: discord.Interaction):
+        await self.view.handle_move(interaction, self.index)
+
+
+class TicTacToeView(discord.ui.View):
+    """Live Tic-Tac-Toe board. No wager — just bragging rights."""
+
+    def __init__(self, player_x, player_o):
+        super().__init__(timeout=180)
+        self.player_x = player_x
+        self.player_o = player_o
+        self.board = [None] * 9
+        self.turn = player_x
+        for i in range(9):
+            self.add_item(TicTacToeButton(i))
+
+    def current_symbol(self):
+        return "X" if self.turn.id == self.player_x.id else "O"
+
+    def check_winner(self):
+        for line in TTT_WIN_LINES:
+            a, b, c = line
+            if self.board[a] and self.board[a] == self.board[b] == self.board[c]:
+                return line
+        return None
+
+    async def handle_move(self, interaction, index):
+        if interaction.user.id not in (self.player_x.id, self.player_o.id):
+            await interaction.response.send_message("This isn't your game!", ephemeral=True)
+            return
+        if interaction.user.id != self.turn.id:
+            await interaction.response.send_message("It's not your turn!", ephemeral=True)
+            return
+        if self.board[index] is not None:
+            await interaction.response.send_message("That cell's taken!", ephemeral=True)
+            return
+
+        symbol = self.current_symbol()
+        self.board[index] = symbol
+        button = self.children[index]
+        button.label = symbol
+        button.style = discord.ButtonStyle.danger if symbol == "X" else discord.ButtonStyle.primary
+        button.disabled = True
+
+        winner_line = self.check_winner()
+        if winner_line:
+            for i in winner_line:
+                self.children[i].style = discord.ButtonStyle.success
+            for child in self.children:
+                child.disabled = True
+            winner = self.player_x if symbol == "X" else self.player_o
+            await interaction.response.edit_message(content=f"🎉 {winner.mention} wins Tic-Tac-Toe!", view=self)
+            self.stop()
+            return
+
+        if all(cell is not None for cell in self.board):
+            for child in self.children:
+                child.disabled = True
+            await interaction.response.edit_message(content="🤝 It's a draw!", view=self)
+            self.stop()
+            return
+
+        self.turn = self.player_o if self.turn.id == self.player_x.id else self.player_x
+        await interaction.response.edit_message(
+            content=f"❌⭕ Tic-Tac-Toe — {self.turn.mention}'s turn ({self.current_symbol()})", view=self
+        )
+
+
+@bot.hybrid_command()
+async def tictactoe(ctx, opponent: discord.Member):
+    """Play Tic-Tac-Toe against another member — no wager, just bragging rights."""
+    if opponent.bot:
+        await ctx.send("You can't play against a bot 🤖")
+        return
+    if opponent.id == ctx.author.id:
+        await ctx.send("You can't play against yourself 💀")
+        return
+
+    view = TicTacToeView(ctx.author, opponent)
+    await ctx.send(
+        f"❌⭕ Tic-Tac-Toe — {ctx.author.mention} (X) vs {opponent.mention} (O)\n{ctx.author.mention}'s turn (X)",
+        view=view,
+    )
+
+
+# ===================== BLACKJACK =====================
+CARD_RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"]
+CARD_SUITS = ["♠", "♥", "♦", "♣"]
+
+
+def new_deck():
+    deck = [(rank, suit) for rank in CARD_RANKS for suit in CARD_SUITS]
+    random.shuffle(deck)
+    return deck
+
+
+def card_label(card):
+    rank, suit = card
+    return f"{rank}{suit}"
+
+
+def hand_value(hand):
+    value, aces = 0, 0
+    for rank, _ in hand:
+        if rank == "A":
+            value += 11
+            aces += 1
+        elif rank in ("J", "Q", "K"):
+            value += 10
+        else:
+            value += int(rank)
+    while value > 21 and aces:
+        value -= 10
+        aces -= 1
+    return value
+
+
+def hand_display(hand):
+    return " ".join(card_label(c) for c in hand)
+
+
+class BlackjackView(discord.ui.View):
+    """Live Blackjack hand vs the dealer. Bet is only actually moved at the end (win/lose/push)."""
+
+    def __init__(self, player, bet, deck, player_hand, dealer_hand):
+        super().__init__(timeout=120)
+        self.player = player
+        self.bet = bet
+        self.deck = deck
+        self.player_hand = player_hand
+        self.dealer_hand = dealer_hand
+
+    def render(self, reveal_dealer=False):
+        dealer_display = hand_display(self.dealer_hand) if reveal_dealer else f"{card_label(self.dealer_hand[0])} 🂠"
+        return (
+            f"**Dealer:** {dealer_display}\n"
+            f"**{self.player.display_name}:** {hand_display(self.player_hand)} (**{hand_value(self.player_hand)}**)"
+        )
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.player.id:
+            await interaction.response.send_message("This isn't your game!", ephemeral=True)
+            return False
+        return True
+
+    async def finish(self, interaction, outcome_text, net_xp):
+        for child in self.children:
+            child.disabled = True
+
+        levels = load_levels()
+        guild_levels = get_guild_bucket(levels, str(self.player.guild.id))
+        old_level, new_level = apply_xp_change(guild_levels, str(self.player.id), net_xp)
+        save_levels(levels)
+
+        content = (
+            f"{self.render(reveal_dealer=True)}\n**Dealer total: {hand_value(self.dealer_hand)}**\n\n{outcome_text}"
+        )
+        await interaction.response.edit_message(content=content, view=self)
+        self.stop()
+
+        if new_level != old_level:
+            await update_level_role(self.player, new_level)
+
+    @discord.ui.button(label="Hit", style=discord.ButtonStyle.primary)
+    async def hit(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.player_hand.append(self.deck.pop())
+        if hand_value(self.player_hand) > 21:
+            await self.finish(interaction, f"💥 Bust! You lose **{self.bet} XP**.", -self.bet)
+            return
+        await interaction.response.edit_message(content=self.render(), view=self)
+
+    @discord.ui.button(label="Stand", style=discord.ButtonStyle.secondary)
+    async def stand(self, interaction: discord.Interaction, button: discord.ui.Button):
+        while hand_value(self.dealer_hand) < 17:
+            self.dealer_hand.append(self.deck.pop())
+
+        player_total = hand_value(self.player_hand)
+        dealer_total = hand_value(self.dealer_hand)
+
+        if dealer_total > 21 or player_total > dealer_total:
+            await self.finish(interaction, f"🎉 You win **{self.bet} XP**!", self.bet)
+        elif player_total == dealer_total:
+            await self.finish(interaction, "🤝 Push — bet returned.", 0)
+        else:
+            await self.finish(interaction, f"😔 Dealer wins. You lose **{self.bet} XP**.", -self.bet)
+
+
+@bot.hybrid_command()
+async def blackjack(ctx, bet: int):
+    """Play Blackjack vs the dealer — bet XP, get closer to 21 without busting."""
+    if ctx.guild is None:
+        await ctx.send("XP is per-server — run this in a server, not in DMs.")
+        return
+
+    if bet <= 0:
+        await ctx.send("Bet at least 1 XP.")
+        return
+
+    levels = load_levels()
+    guild_levels = get_guild_bucket(levels, str(ctx.guild.id))
+    user_id = str(ctx.author.id)
+    if get_total_xp(guild_levels, user_id) < bet:
+        await ctx.send(f"You don't have {bet} XP to bet!")
+        return
+
+    deck = new_deck()
+    player_hand = [deck.pop(), deck.pop()]
+    dealer_hand = [deck.pop(), deck.pop()]
+    view = BlackjackView(ctx.author, bet, deck, player_hand, dealer_hand)
+
+    if hand_value(player_hand) == 21:
+        payout = int(bet * 1.5)
+        old_level, new_level = apply_xp_change(guild_levels, user_id, payout)
+        save_levels(levels)
+        await ctx.send(f"{view.render(reveal_dealer=True)}\n\n🃏 **Blackjack!** You win **{payout} XP**!")
+        if new_level != old_level:
+            await update_level_role(ctx.author, new_level)
+        return
+
+    await ctx.send(view.render(), view=view)
+
+
+# ===================== BOSS FIGHT =====================
+# In-memory only (per channel) — an active fight won't survive a bot restart, but that's a fair
+# tradeoff for keeping this simple; restarts mid-fight should be rare.
+active_boss_fights = {}
+BOSS_NAMES = ["Chaos Wyrm", "Void Reaper", "Inferno Titan", "Shadow Colossus", "Storm Leviathan"]
+
+
+class BossFightView(discord.ui.View):
+    def __init__(self, channel_id, guild_id, boss_name, max_hp):
+        super().__init__(timeout=600)
+        self.channel_id = channel_id
+        self.guild_id = guild_id
+        self.boss_name = boss_name
+        self.max_hp = max_hp
+        self.hp = max_hp
+        self.damage_dealt = {}
+        self.participants = {}
+        self.defeated = False
+
+    def hp_bar(self):
+        pct = max(self.hp, 0) / self.max_hp
+        filled = round(pct * 20)
+        return "🟥" * filled + "⬛" * (20 - filled)
+
+    def render(self):
+        top = sorted(self.damage_dealt.items(), key=lambda kv: kv[1], reverse=True)[:5]
+        lines = [f"<@{uid}> — {dmg} dmg" for uid, dmg in top] or ["No hits yet — click Attack!"]
+        return (
+            f"👹 **{self.boss_name}**\n"
+            f"{self.hp_bar()}  **{max(self.hp, 0)}/{self.max_hp} HP**\n\n"
+            f"**Top damage:**\n" + "\n".join(lines)
+        )
+
+    @discord.ui.button(label="⚔️ Attack", style=discord.ButtonStyle.danger)
+    async def attack(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.defeated:
+            await interaction.response.send_message("This boss is already defeated!", ephemeral=True)
+            return
+
+        dmg = random.randint(8, 25)
+        crit = random.random() < 0.12
+        if crit:
+            dmg *= 2
+
+        self.hp -= dmg
+        self.damage_dealt[interaction.user.id] = self.damage_dealt.get(interaction.user.id, 0) + dmg
+        self.participants[interaction.user.id] = interaction.user
+
+        crit_text = " 💥 **CRIT!**" if crit else ""
+        hit_msg = f"{interaction.user.mention} hits **{self.boss_name}** for **{dmg}** damage!{crit_text}"
+
+        if self.hp <= 0:
+            self.defeated = True
+            for child in self.children:
+                child.disabled = True
+
+            levels = load_levels()
+            guild_levels = get_guild_bucket(levels, str(self.guild_id))
+            reward_lines = []
+            for uid, dmg_dealt in self.damage_dealt.items():
+                reward = max(10, dmg_dealt * 3)
+                old_level, new_level = apply_xp_change(guild_levels, str(uid), reward)
+                reward_lines.append(f"<@{uid}> +{reward} XP")
+                member = self.participants.get(uid)
+                if member and new_level != old_level:
+                    await update_level_role(member, new_level)
+            save_levels(levels)
+
+            active_boss_fights.pop(self.channel_id, None)
+
+            content = (
+                f"{hit_msg}\n\n💀 **{self.boss_name} has been defeated!**\n\n"
+                f"**Rewards:**\n" + "\n".join(reward_lines)
+            )
+            await interaction.response.edit_message(content=content, view=self)
+            self.stop()
+            return
+
+        await interaction.response.edit_message(content=f"{hit_msg}\n\n{self.render()}", view=self)
+
+
+@bot.hybrid_command()
+async def bossfight(ctx):
+    """Spawn a boss for the server to fight together — attackers earn XP on the kill."""
+    if ctx.guild is None:
+        await ctx.send("Boss fights only work in a server, not DMs.")
+        return
+
+    if ctx.channel.id in active_boss_fights:
+        await ctx.send("There's already an active boss fight in this channel!")
+        return
+
+    boss_name = random.choice(BOSS_NAMES)
+    max_hp = random.randint(300, 600)
+    view = BossFightView(ctx.channel.id, ctx.guild.id, boss_name, max_hp)
+    active_boss_fights[ctx.channel.id] = view
+
+    await ctx.send(f"👹 A wild **{boss_name}** appeared with **{max_hp} HP**! Click Attack to fight!\n\n{view.render()}", view=view)
+
 
 
 def load_investments():
@@ -1208,7 +1740,7 @@ def save_investments(data):
         json.dump(data, f, indent=4)
 
 
-@bot.command()
+@bot.hybrid_command()
 async def invest(ctx, target: discord.Member, amount: int):
     """Invest XP in another member — its value rises and falls with their XP growth (or decline)."""
     if amount <= 0:
@@ -1227,35 +1759,38 @@ async def invest(ctx, target: discord.Member, amount: int):
         await ctx.send("🚫 You can't invest in the bot owner — nice try 😏")
         return
 
+    guild_id = str(ctx.guild.id)
     levels = load_levels()
+    guild_levels = get_guild_bucket(levels, guild_id)
     investor_id = str(ctx.author.id)
     target_id = str(target.id)
 
-    investor_xp = get_total_xp(levels, investor_id)
+    investor_xp = get_total_xp(guild_levels, investor_id)
     if investor_xp < amount:
         await ctx.send(f"You don't have {amount} XP to invest!")
         return
 
-    target_xp = get_total_xp(levels, target_id)
+    target_xp = get_total_xp(guild_levels, target_id)
     if target_xp <= 0:
         await ctx.send(f"{target.mention} hasn't earned any XP yet — nothing to invest in!")
         return
 
     investments = load_investments()
-    if investor_id not in investments:
-        investments[investor_id] = {}
+    guild_investments = get_guild_bucket(investments, guild_id)
+    if investor_id not in guild_investments:
+        guild_investments[investor_id] = {}
 
-    if target_id in investments[investor_id]:
+    if target_id in guild_investments[investor_id]:
         await ctx.send(
             f"You already have an active investment in {target.mention}. "
             f"Cash out first with `!cashout @{target.display_name}` before investing again."
         )
         return
 
-    apply_xp_change(levels, investor_id, -amount)
+    apply_xp_change(guild_levels, investor_id, -amount)
     save_levels(levels)
 
-    investments[investor_id][target_id] = {
+    guild_investments[investor_id][target_id] = {
         "amount": amount,
         "base_xp": target_xp,
     }
@@ -1266,25 +1801,31 @@ async def invest(ctx, target: discord.Member, amount: int):
     )
 
 
-@bot.command()
+@bot.hybrid_command()
 async def portfolio(ctx, member: discord.Member = None):
     """Shows your (or someone else's) active investments and their current value."""
+    if ctx.guild is None:
+        await ctx.send("Investments are per-server — run this in a server, not in DMs.")
+        return
+
     member = member or ctx.author
+    guild_id = str(ctx.guild.id)
     investments = load_investments()
+    guild_investments = get_guild_bucket(investments, guild_id)
     investor_id = str(member.id)
 
-    if investor_id not in investments or not investments[investor_id]:
+    if investor_id not in guild_investments or not guild_investments[investor_id]:
         await ctx.send(f"{member.mention} has no active investments.")
         return
 
-    levels = load_levels()
+    guild_levels = get_guild_bucket(load_levels(), guild_id)
     embed = discord.Embed(title=f"📊 {member.display_name}'s Portfolio", color=discord.Color.green())
 
-    for target_id, inv in investments[investor_id].items():
+    for target_id, inv in guild_investments[investor_id].items():
         target_member = ctx.guild.get_member(int(target_id))
         name = target_member.display_name if target_member else f"User {target_id}"
 
-        current_target_xp = get_total_xp(levels, target_id)
+        current_target_xp = get_total_xp(guild_levels, target_id)
         base_xp = max(inv["base_xp"], 1)
         current_value = int(inv["amount"] * (current_target_xp / base_xp))
         change_pct = ((current_value - inv["amount"]) / inv["amount"]) * 100 if inv["amount"] else 0
@@ -1299,28 +1840,31 @@ async def portfolio(ctx, member: discord.Member = None):
     await ctx.send(embed=embed)
 
 
-@bot.command()
+@bot.hybrid_command()
 async def cashout(ctx, target: discord.Member):
     """Cash out your investment in a member, converting its current value back to your own XP."""
+    guild_id = str(ctx.guild.id)
     investments = load_investments()
+    guild_investments = get_guild_bucket(investments, guild_id)
     investor_id = str(ctx.author.id)
     target_id = str(target.id)
 
-    if investor_id not in investments or target_id not in investments[investor_id]:
+    if investor_id not in guild_investments or target_id not in guild_investments[investor_id]:
         await ctx.send(f"You don't have an active investment in {target.mention}.")
         return
 
     levels = load_levels()
-    inv = investments[investor_id][target_id]
+    guild_levels = get_guild_bucket(levels, guild_id)
+    inv = guild_investments[investor_id][target_id]
 
-    current_target_xp = get_total_xp(levels, target_id)
+    current_target_xp = get_total_xp(guild_levels, target_id)
     base_xp = max(inv["base_xp"], 1)
     current_value = max(int(inv["amount"] * (current_target_xp / base_xp)), 0)
 
-    old_level, new_level = apply_xp_change(levels, investor_id, current_value)
+    old_level, new_level = apply_xp_change(guild_levels, investor_id, current_value)
     save_levels(levels)
 
-    del investments[investor_id][target_id]
+    del guild_investments[investor_id][target_id]
     save_investments(investments)
 
     change = current_value - inv["amount"]
@@ -1383,7 +1927,7 @@ class ShopView(discord.ui.View):
 
     def build_embed(self):
         embed = discord.Embed(
-            title="🛒 Chaos Shop — 1000 cosmetic roles",
+            title="🛒 Chaos Shop — 100 cosmetic roles",
             description=f"{self.pages[self.index]}\n\nBuy with `!buy <item>` • Page {self.index + 1}/{len(self.pages)}",
             color=discord.Color.dark_red(),
         )
@@ -1417,9 +1961,13 @@ class ShopView(discord.ui.View):
         await interaction.response.edit_message(embed=self.build_embed(), view=self)
 
 
-@bot.command()
+@bot.hybrid_command()
 async def shop(ctx):
-    """Browse the shop — 1000 cosmetic roles, all tiers together per page, labeled by tier. Buy with !buy <item>."""
+    """Browse the shop — 100 cosmetic roles across tiers. Buy with !buy <item>."""
+    if ctx.guild is None:
+        await ctx.send("The shop is per-server — run this in a server text channel, not in DMs.")
+        return
+
     purchases = load_shop_purchases()
     guild_id = str(ctx.guild.id)
     user_id = str(ctx.author.id)
@@ -1430,9 +1978,13 @@ async def shop(ctx):
     view.message = await ctx.send(embed=view.build_embed(), view=view)
 
 
-@bot.command()
+@bot.hybrid_command()
 async def buy(ctx, item_key: str):
-    """Buy a cosmetic role from the shop using your XP. Bot owner only: `!buy all` grants every item for free."""
+    """Buy a cosmetic role from the shop using your XP. Owner only: `buy all` grants everything free."""
+    if ctx.guild is None:
+        await ctx.send("The shop is per-server — run this in a server text channel, not in DMs.")
+        return
+
     item_key = item_key.lower()
 
     if item_key == "all":
@@ -1452,7 +2004,8 @@ async def buy(ctx, item_key: str):
 
         total_cost = sum(item["price"] for item in unowned.values())
         levels = load_levels()
-        user_xp = get_total_xp(levels, user_id)
+        guild_levels = get_guild_bucket(levels, guild_id)
+        user_xp = get_total_xp(guild_levels, user_id)
 
         if user_xp < total_cost:
             await ctx.send(
@@ -1483,7 +2036,7 @@ async def buy(ctx, item_key: str):
             granted.append(item["name"])
 
         granted_cost = sum(unowned[k]["price"] for k in owned if k in unowned)
-        old_level, new_level = apply_xp_change(levels, user_id, -granted_cost)
+        old_level, new_level = apply_xp_change(guild_levels, user_id, -granted_cost)
         save_levels(levels)
         save_shop_purchases(purchases)
 
@@ -1513,7 +2066,8 @@ async def buy(ctx, item_key: str):
 
     item = SHOP_ITEMS[item_key]
     levels = load_levels()
-    user_xp = get_total_xp(levels, user_id)
+    guild_levels = get_guild_bucket(levels, guild_id)
+    user_xp = get_total_xp(guild_levels, user_id)
 
     if user_xp < item["price"]:
         await ctx.send(f"You need **{item['price']} XP** for {item['name']} — you have **{user_xp} XP**.")
@@ -1527,14 +2081,14 @@ async def buy(ctx, item_key: str):
             await ctx.send("⚠️ I don't have permission to create/assign that role here — ask a server admin to give me the **Manage Roles** permission.")
         return
 
-    old_level, new_level = apply_xp_change(levels, user_id, -item["price"])
+    old_level, new_level = apply_xp_change(guild_levels, user_id, -item["price"])
     save_levels(levels)
 
     try:
         await ctx.author.add_roles(role)
     except discord.Forbidden:
         # Refund if the role couldn't actually be assigned
-        apply_xp_change(levels, user_id, item["price"])
+        apply_xp_change(guild_levels, user_id, item["price"])
         save_levels(levels)
         await ctx.send("⚠️ Couldn't assign that role (permissions issue) — you've been refunded.")
         return
@@ -1595,13 +2149,79 @@ async def send_server_list_dm(user):
         await user.send(embed=embed)
 
 
-@bot.command()
+@bot.hybrid_command()
 @is_bot_owner()
 async def servers(ctx):
     """Owner-only: DMs you a styled list of every server the bot is in, with each server's owner."""
     await send_server_list_dm(ctx.author)
     if ctx.guild:  # only try to confirm in-channel if this wasn't already a DM
         await ctx.send("📩 Sent you the full list in DMs!")
+
+
+class WelcomeChannelSelect(discord.ui.ChannelSelect):
+    """Native Discord channel picker — only shows real text channels the user can actually pick from."""
+
+    def __init__(self):
+        super().__init__(
+            placeholder="Choose a channel for welcome messages...",
+            channel_types=[discord.ChannelType.text],
+            min_values=1,
+            max_values=1,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        # ChannelSelect.values gives a lightweight partial channel — resolve the real one from
+        # cache so we can actually check permissions on it.
+        selected_channel = guild.get_channel(self.values[0].id)
+
+        if selected_channel is None:
+            await interaction.response.edit_message(content="⚠️ Couldn't find that channel — try again.", view=None)
+            return
+
+        perms = selected_channel.permissions_for(guild.me)
+        if not perms.send_messages:
+            await interaction.response.edit_message(
+                content=f"⚠️ I don't have permission to send messages in {selected_channel.mention} — pick a different channel or fix my permissions there.",
+                view=None,
+            )
+            return
+
+        welcome_channels = load_welcome_channels()
+        welcome_channels[str(guild.id)] = str(selected_channel.id)
+        save_welcome_channels(welcome_channels)
+
+        await interaction.response.edit_message(
+            content=f"✅ Welcome messages will now be sent in {selected_channel.mention}.",
+            view=None,
+        )
+
+
+class SetupView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=120)
+        self.add_item(WelcomeChannelSelect())
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item):
+        print(f"⚠️ Error in /setup view: {error}")
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send("⚠️ Something went wrong — try `/setup` again.", ephemeral=True)
+            else:
+                await interaction.response.send_message("⚠️ Something went wrong — try `/setup` again.", ephemeral=True)
+        except discord.HTTPException:
+            pass
+
+
+@bot.hybrid_command()
+@is_admin_or_owner()
+async def setup(ctx):
+    """Admin only: pick which channel new-member welcome messages get sent to."""
+    if ctx.guild is None:
+        await ctx.send("Run this in a server, not in DMs — it configures that server's welcome channel.")
+        return
+
+    await ctx.send("⚙️ **Server Setup** — pick a channel for welcome messages:", view=SetupView())
 
 
 class RemoveServerSelect(discord.ui.Select):
@@ -1778,4 +2398,422 @@ async def send_unban_server_menu_dm(user):
     await user.send("🛡️ **Moderation — Unban Server**\nPick a server below to lift its ban.", view=view)
 
 
-bot.run(TOKEN)
+# ===================== CHAOS TICKET SYSTEM =====================
+TICKET_CONFIG_FILE = "ticket_config.json"
+TICKETS_FILE = "tickets.json"
+
+TICKET_CATEGORIES = {
+    "bug": {"emoji": "🐛", "label": "Bug Report", "desc": "Something's broken and it's chaos"},
+    "shop": {"emoji": "💰", "label": "Shop / Purchase Issue", "desc": "XP, roles, or a buy gone wrong"},
+    "report": {"emoji": "🚨", "label": "Report a Member", "desc": "Someone's causing real chaos"},
+    "question": {"emoji": "❓", "label": "General Question", "desc": "Just need to ask something"},
+    "emergency": {"emoji": "🔥", "label": "Chaos Emergency", "desc": "Everything is on fire, send help"},
+}
+
+TICKET_OPEN_LINES = [
+    "Alright, buckle up — a staff member will be here shortly.",
+    "Ticket secured. Chaos will be handled accordingly.",
+    "Message received loud and clear. Someone's on the way.",
+    "This ticket is now officially Your Problem™ (staff's, not yours).",
+]
+
+
+def load_ticket_config():
+    if os.path.exists(TICKET_CONFIG_FILE):
+        with open(TICKET_CONFIG_FILE, "r") as f:
+            try:
+                return json.load(f)
+            except json.JSONDecodeError:
+                return {}
+    return {}
+
+
+def save_ticket_config(data):
+    with open(TICKET_CONFIG_FILE, "w") as f:
+        json.dump(data, f, indent=4)
+
+
+def load_tickets():
+    if os.path.exists(TICKETS_FILE):
+        with open(TICKETS_FILE, "r") as f:
+            try:
+                return json.load(f)
+            except json.JSONDecodeError:
+                return {}
+    return {}
+
+
+def save_tickets(data):
+    with open(TICKETS_FILE, "w") as f:
+        json.dump(data, f, indent=4)
+
+
+async def get_or_create_ticket_category(guild, staff_role):
+    """Lazily creates (or reuses) a 'Chaos Tickets' category, private by default."""
+    category = discord.utils.get(guild.categories, name="🎫 Chaos Tickets")
+    if category is not None:
+        return category
+
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+    }
+    if staff_role:
+        overwrites[staff_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+
+    try:
+        return await guild.create_category("🎫 Chaos Tickets", overwrites=overwrites, reason="Ticket system setup")
+    except discord.Forbidden:
+        return None
+
+
+class TicketCategorySelect(discord.ui.Select):
+    """Persistent select — survives bot restarts via a fixed custom_id, no per-instance state needed."""
+
+    def __init__(self):
+        options = [
+            discord.SelectOption(label=data["label"], description=data["desc"], emoji=data["emoji"], value=key)
+            for key, data in TICKET_CATEGORIES.items()
+        ]
+        super().__init__(
+            placeholder="🎫 Open a ticket — pick a category...",
+            options=options,
+            min_values=1,
+            max_values=1,
+            custom_id="ticket_open_category_select",
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        category_key = self.values[0]
+        category_data = TICKET_CATEGORIES[category_key]
+        opener = interaction.user
+
+        tickets = load_tickets()
+        guild_tickets = tickets.setdefault(str(guild.id), {})
+
+        for existing_channel_id, info in guild_tickets.items():
+            if info["opener_id"] == str(opener.id):
+                existing_channel = guild.get_channel(int(existing_channel_id))
+                if existing_channel:
+                    await interaction.response.send_message(
+                        f"You already have an open ticket: {existing_channel.mention}", ephemeral=True
+                    )
+                    return
+
+        config = load_ticket_config().get(str(guild.id), {})
+        staff_role = guild.get_role(int(config["staff_role_id"])) if config.get("staff_role_id") else None
+
+        ticket_category = await get_or_create_ticket_category(guild, staff_role)
+        if ticket_category is None:
+            await interaction.response.send_message(
+                "⚠️ I don't have permission to create ticket channels here — ask an admin to check my permissions.",
+                ephemeral=True,
+            )
+            return
+
+        config["ticket_counter"] = config.get("ticket_counter", 0) + 1
+        ticket_number = config["ticket_counter"]
+        full_config = load_ticket_config()
+        full_config[str(guild.id)] = config
+        save_ticket_config(full_config)
+
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+            opener: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+        }
+        if staff_role:
+            overwrites[staff_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+
+        channel_name = f"ticket-{ticket_number:04d}-{opener.name}"[:100]
+        try:
+            ticket_channel = await guild.create_text_channel(
+                channel_name, category=ticket_category, overwrites=overwrites,
+                reason=f"Ticket opened by {opener}",
+            )
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                "⚠️ I don't have permission to create ticket channels here.", ephemeral=True
+            )
+            return
+
+        guild_tickets[str(ticket_channel.id)] = {
+            "opener_id": str(opener.id),
+            "category": category_key,
+            "claimed_by": None,
+            "ticket_number": ticket_number,
+            "created_at": time.time(),
+        }
+        save_tickets(tickets)
+
+        embed = discord.Embed(
+            title=f"{category_data['emoji']} Ticket #{ticket_number:04d} — {category_data['label']}",
+            description=(
+                f"{random.choice(TICKET_OPEN_LINES)}\n\n"
+                f"**Opened by:** {opener.mention}\n"
+                f"**Category:** {category_data['label']}"
+            ),
+            color=discord.Color.dark_red(),
+        )
+        embed.set_footer(text="Use the buttons below to claim or close this ticket.")
+
+        await ticket_channel.send(
+            content=f"{opener.mention}" + (f" {staff_role.mention}" if staff_role else ""),
+            embed=embed,
+            view=TicketActionsView(),
+        )
+        await interaction.response.send_message(f"🎫 Ticket created: {ticket_channel.mention}", ephemeral=True)
+
+
+class TicketPanelView(discord.ui.View):
+    """The public panel members click to open a ticket. Persistent — timeout=None + fixed custom_id."""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(TicketCategorySelect())
+
+
+async def get_or_create_ticket_log_channel(guild, staff_role):
+    """Lazily creates (or reuses) a private #ticket-logs channel — closed transcripts post here
+    instead of DMing anyone, so closing tickets never floods a person's DMs."""
+    channel = discord.utils.get(guild.text_channels, name="ticket-logs")
+    if channel is not None:
+        return channel
+
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+    }
+    if staff_role:
+        overwrites[staff_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+
+    try:
+        return await guild.create_text_channel("ticket-logs", overwrites=overwrites, reason="Ticket log channel")
+    except discord.Forbidden:
+        return None
+
+
+class TicketCloseReasonModal(discord.ui.Modal, title="Close Ticket"):
+    reason_input = discord.ui.TextInput(
+        label="Reason for closing (optional)",
+        style=discord.TextStyle.paragraph,
+        required=False,
+        max_length=500,
+        placeholder="e.g. Issue resolved, duplicate ticket, spam...",
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        tickets = load_tickets()
+        guild_tickets = tickets.setdefault(str(guild.id), {})
+        ticket = guild_tickets.get(str(interaction.channel.id), {
+            "opener_id": str(interaction.user.id), "category": "question", "ticket_number": 0,
+        })
+
+        reason_text = self.reason_input.value.strip() or "No reason provided"
+        await interaction.response.send_message(f"🔒 Closing this ticket in 5 seconds...\n**Reason:** {reason_text}")
+
+        # Build a simple text transcript before the channel disappears
+        lines = []
+        async for msg in interaction.channel.history(limit=500, oldest_first=True):
+            timestamp = msg.created_at.strftime("%Y-%m-%d %H:%M")
+            lines.append(f"[{timestamp}] {msg.author}: {msg.content}")
+        transcript_text = "\n".join(lines) or "(no messages)"
+
+        config = load_ticket_config().get(str(guild.id), {})
+        staff_role = guild.get_role(int(config["staff_role_id"])) if config.get("staff_role_id") else None
+        log_channel = await get_or_create_ticket_log_channel(guild, staff_role)
+
+        if log_channel:
+            opener = guild.get_member(int(ticket["opener_id"]))
+            category_label = TICKET_CATEGORIES.get(ticket.get("category"), {}).get("label", "Unknown")
+
+            embed = discord.Embed(
+                title=f"🔒 Ticket #{ticket.get('ticket_number', 0):04d} Closed",
+                color=discord.Color.dark_grey(),
+            )
+            embed.add_field(name="Opened by", value=opener.mention if opener else f"User {ticket['opener_id']}", inline=True)
+            embed.add_field(name="Closed by", value=interaction.user.mention, inline=True)
+            embed.add_field(name="Category", value=category_label, inline=True)
+            embed.add_field(name="Reason", value=reason_text, inline=False)
+
+            transcript_file = discord.File(
+                io.StringIO(transcript_text), filename=f"ticket-{ticket.get('ticket_number', 0):04d}-transcript.txt"
+            )
+            await log_channel.send(embed=embed, file=transcript_file)
+
+        if str(interaction.channel.id) in guild_tickets:
+            del guild_tickets[str(interaction.channel.id)]
+            save_tickets(tickets)
+
+        await asyncio.sleep(5)
+        try:
+            await interaction.channel.delete(reason=f"Ticket closed: {reason_text}")
+        except discord.Forbidden:
+            pass
+
+
+
+    """Claim/Close buttons inside an open ticket channel. Persistent — works after restarts since
+    all needed info is looked up fresh from tickets.json using the channel ID, not stored on the view."""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="🙋 Claim", style=discord.ButtonStyle.primary, custom_id="ticket_claim_btn")
+    async def claim(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild = interaction.guild
+        config = load_ticket_config().get(str(guild.id), {})
+        staff_role = guild.get_role(int(config["staff_role_id"])) if config.get("staff_role_id") else None
+
+        is_staff_member = (
+            (staff_role and staff_role in interaction.user.roles)
+            or interaction.user.guild_permissions.administrator
+            or (BOT_OWNER_ID and interaction.user.id == int(BOT_OWNER_ID))
+        )
+        if not is_staff_member:
+            await interaction.response.send_message("🚫 Only staff can claim tickets.", ephemeral=True)
+            return
+
+        tickets = load_tickets()
+        guild_tickets = tickets.setdefault(str(guild.id), {})
+        ticket = guild_tickets.get(str(interaction.channel.id))
+        if ticket is None:
+            await interaction.response.send_message("⚠️ This doesn't look like an active ticket.", ephemeral=True)
+            return
+
+        ticket["claimed_by"] = str(interaction.user.id)
+        save_tickets(tickets)
+
+        button.label = f"Claimed by {interaction.user.display_name}"
+        button.disabled = True
+        await interaction.response.edit_message(view=self)
+        await interaction.followup.send(f"🙋 {interaction.user.mention} claimed this ticket — the chaos is contained.")
+
+    @discord.ui.button(label="🔒 Close Ticket", style=discord.ButtonStyle.danger, custom_id="ticket_close_btn")
+    async def close(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild = interaction.guild
+        tickets = load_tickets()
+        guild_tickets = tickets.setdefault(str(guild.id), {})
+        ticket = guild_tickets.get(str(interaction.channel.id))
+        if ticket is None:
+            await interaction.response.send_message("⚠️ This doesn't look like an active ticket.", ephemeral=True)
+            return
+
+        config = load_ticket_config().get(str(guild.id), {})
+        staff_role = guild.get_role(int(config["staff_role_id"])) if config.get("staff_role_id") else None
+        is_staff_member = (
+            (staff_role and staff_role in interaction.user.roles)
+            or interaction.user.guild_permissions.administrator
+            or (BOT_OWNER_ID and interaction.user.id == int(BOT_OWNER_ID))
+        )
+        is_opener = str(interaction.user.id) == ticket["opener_id"]
+        if not (is_staff_member or is_opener):
+            await interaction.response.send_message("🚫 Only the ticket opener or staff can close this.", ephemeral=True)
+            return
+
+        await interaction.response.send_modal(TicketCloseReasonModal())
+
+
+class TicketSetupChannelSelect(discord.ui.ChannelSelect):
+    def __init__(self):
+        super().__init__(
+            placeholder="Choose a channel for the ticket panel...",
+            channel_types=[discord.ChannelType.text],
+            min_values=1, max_values=1,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        self.view.panel_channel_id = self.values[0].id
+        await interaction.response.defer()
+
+
+class TicketSetupRoleSelect(discord.ui.RoleSelect):
+    def __init__(self):
+        super().__init__(placeholder="Choose the staff role for tickets...", min_values=1, max_values=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        self.view.staff_role_id = self.values[0].id
+        await interaction.response.defer()
+
+
+class TicketSetupView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=180)
+        self.panel_channel_id = None
+        self.staff_role_id = None
+        self.add_item(TicketSetupChannelSelect())
+        self.add_item(TicketSetupRoleSelect())
+
+    @discord.ui.button(label="✅ Post Ticket Panel", style=discord.ButtonStyle.success, row=2)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.panel_channel_id is None or self.staff_role_id is None:
+            await interaction.response.send_message("Pick both a channel and a staff role first.", ephemeral=True)
+            return
+
+        guild = interaction.guild
+        channel = guild.get_channel(self.panel_channel_id)
+        if channel is None:
+            await interaction.response.send_message("⚠️ Couldn't find that channel — try again.", ephemeral=True)
+            return
+
+        config = load_ticket_config()
+        config[str(guild.id)] = {
+            **config.get(str(guild.id), {}),
+            "panel_channel_id": str(self.panel_channel_id),
+            "staff_role_id": str(self.staff_role_id),
+        }
+        save_ticket_config(config)
+
+        embed = discord.Embed(
+            title="🎫 Need Help? Open a Ticket",
+            description="Pick a category from the dropdown below and a private channel will be created just for you.",
+            color=discord.Color.dark_red(),
+        )
+        await channel.send(embed=embed, view=TicketPanelView())
+
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(
+            content=f"✅ Ticket panel posted in {channel.mention}, staff role set.", view=self
+        )
+
+
+@bot.hybrid_command()
+@is_admin_or_owner()
+async def ticketsetup(ctx):
+    """Admin only: set up the chaos ticket system — pick a panel channel and staff role."""
+    if ctx.guild is None:
+        await ctx.send("Run this in a server, not in DMs.")
+        return
+
+    await ctx.send("⚙️ **Ticket Setup** — configure both, then hit Post Ticket Panel:", view=TicketSetupView())
+
+
+@bot.hybrid_command()
+@is_admin_or_owner()
+async def ticketpanel(ctx):
+    """Admin only: resend the ticket panel to its configured channel — handy if it's buried."""
+    if ctx.guild is None:
+        await ctx.send("Run this in a server, not in DMs.")
+        return
+
+    config = load_ticket_config().get(str(ctx.guild.id), {})
+    channel_id = config.get("panel_channel_id")
+    if not channel_id:
+        await ctx.send("No ticket panel has been set up yet — run `/ticketsetup` first.")
+        return
+
+    channel = ctx.guild.get_channel(int(channel_id))
+    if channel is None:
+        await ctx.send("⚠️ The configured panel channel doesn't exist anymore — run `/ticketsetup` again to pick a new one.")
+        return
+
+    embed = discord.Embed(
+        title="🎫 Need Help? Open a Ticket",
+        description="Pick a category from the dropdown below and a private channel will be created just for you.",
+        color=discord.Color.dark_red(),
+    )
+    await channel.send(embed=embed, view=TicketPanelView())
+    await ctx.send(f"✅ Ticket panel resent in {channel.mention}.")
