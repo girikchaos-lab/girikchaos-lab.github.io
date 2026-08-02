@@ -2817,3 +2817,5 @@ async def ticketpanel(ctx):
     )
     await channel.send(embed=embed, view=TicketPanelView())
     await ctx.send(f"✅ Ticket panel resent in {channel.mention}.")
+
+bot.run(TOKEN)
