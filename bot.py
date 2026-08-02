@@ -2655,6 +2655,7 @@ class TicketCloseReasonModal(discord.ui.Modal, title="Close Ticket"):
 
 
 
+class TicketActionsView(discord.ui.View):
     """Claim/Close buttons inside an open ticket channel. Persistent — works after restarts since
     all needed info is looked up fresh from tickets.json using the channel ID, not stored on the view."""
 
@@ -2818,4 +2819,4 @@ async def ticketpanel(ctx):
     await channel.send(embed=embed, view=TicketPanelView())
     await ctx.send(f"✅ Ticket panel resent in {channel.mention}.")
 
-bot.run(TOKEN)
+
