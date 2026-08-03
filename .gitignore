@@ -1,0 +1,5 @@
+bot.py
+.env
+*.json
+__pycache__/
+venv/
